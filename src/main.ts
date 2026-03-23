@@ -189,9 +189,12 @@ document.getElementById('tex-btn')?.addEventListener('click', () => {
     useTextures = !useTextures;
     const btn = document.getElementById('tex-btn');
     if(btn) btn.innerText = `TEXTURES: ${useTextures?'ON':'OFF'}`;
-    for(let m in mats) {
-        mats[m].map = useTextures ? tex : null;
-        mats[m].needsUpdate = true;
+    for(const m in mats) {
+        const material = mats[m];
+        if (material) {
+            material.map = useTextures ? tex : null;
+            material.needsUpdate = true;
+        }
     }
 });
 
