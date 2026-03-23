@@ -147,7 +147,10 @@ settingsMenu.innerHTML = `
     </div>
 
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-bottom:15px;">
-        ${[1,2,3,4].map(n => `<button onclick="window.saveG(${n})" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE ${n}</button><button onclick="window.loadG(${n})" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD ${n}</button>`).join('')}
+        <button onclick="window.saveG(1)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 1</button><button onclick="window.loadG(1)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 1</button>
+        <button onclick="window.saveG(2)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 2</button><button onclick="window.loadG(2)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 2</button>
+        <button onclick="window.saveG(3)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 3</button><button onclick="window.loadG(3)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 3</button>
+        <button onclick="window.saveG(4)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 4</button><button onclick="window.loadG(4)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 4</button>
     </div>
     
     <button id="resume-btn" style="width:100%; padding:12px; background:#4CAF50; border:none; color:white; border-radius:8px; cursor:pointer; font-weight:bold;">RESUME GAME</button>
@@ -179,19 +182,23 @@ document.getElementById('rd-range')?.addEventListener('input', (e:any) => {
     if(val) val.innerText = e.target.value;
 });
 
-document.getElementById('tex-btn')?.addEventListener('click', (e:any) => {
+document.getElementById('tex-btn')?.addEventListener('click', () => {
     useTextures = !useTextures;
-    e.target.innerText = `TEXTURES: ${useTextures?'ON':'OFF'}`;
+    const btn = document.getElementById('tex-btn');
+    if(btn) btn.innerText = `TEXTURES: ${useTextures?'ON':'OFF'}`;
     for(let m in mats) {
         mats[m].map = useTextures ? tex : null;
         mats[m].needsUpdate = true;
     }
 });
 
-document.getElementById('dev-btn')?.addEventListener('click', (e:any) => {
+document.getElementById('dev-btn')?.addEventListener('click', () => {
     isDev = !isDev;
-    e.target.innerText = `DEV MODE: ${isDev?'ON':'OFF'}`;
-    e.target.style.background = isDev ? '#4CAF50' : '#444';
+    const btn = document.getElementById('dev-btn');
+    if(btn) {
+        btn.innerText = `DEV MODE: ${isDev?'ON':'OFF'}`;
+        btn.style.background = isDev ? '#4CAF50' : '#444';
+    }
     const opts = document.getElementById('dev-opts');
     if(opts) opts.style.display = isDev?'block':'none';
 });
@@ -229,13 +236,11 @@ function animate() {
         time = (time + 0.003) % 2400; 
         clock.innerText = getTimeStr();
 
-        // Sky & Lighting
         const dayInt = Math.max(0.1, Math.sin((time / 2400) * Math.PI) * 1.2);
         scene.background = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.45);
         ambient.intensity = dayInt * 0.7;
         sun.intensity = dayInt * 0.8;
 
-        // Chunk Generation
         const cx = Math.floor(camera.position.x / CHUNK_SIZE);
         const cz = Math.floor(camera.position.z / CHUNK_SIZE);
         for(let x=-renderDist; x<=renderDist; x++) {
@@ -245,20 +250,19 @@ function animate() {
             }
         }
 
-        // --- BETTER PHYSICS ---
-        velY -= 0.008; // Gravity
+        velY -= 0.008; 
         camera.position.y += velY;
         
         const px = Math.round(camera.position.x);
         const pz = Math.round(camera.position.z);
-        const py = Math.floor(camera.position.y - 1.75); // Check block at feet
+        const py = Math.floor(camera.position.y - 1.75); 
         
         const footBlock = blocks.get(`${px},${py},${pz}`);
         if (footBlock && footBlock.userData.type !== 'water') {
             if (velY < 0) {
                 camera.position.y = py + 1.8;
                 velY = 0;
-                if(keys['Space']) velY = 0.16; // Jump
+                if(keys['Space']) velY = 0.16; 
             }
         }
 
@@ -268,7 +272,6 @@ function animate() {
         if(keys['KeyA']) ctrl.moveRight(-speed);
         if(keys['KeyD']) ctrl.moveRight(speed);
 
-        // Animals AI
         animals.forEach(a => {
             if (a.t-- <= 0) { a.t = 100+Math.random()*100; a.v.set((Math.random()-0.5)*0.02, 0, (Math.random()-0.5)*0.02); }
             a.m.position.add(a.v);
