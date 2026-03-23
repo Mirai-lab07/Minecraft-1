@@ -99,7 +99,7 @@ const ctrl = new PointerLockControls(camera, document.body);
 const keys: any = {};
 document.addEventListener('keydown', e => {
     keys[e.code] = true;
-    if (e.key === '0') toggleSet();
+    if (e.key === '0') (window as any).toggleSet();
     if (e.key >= '1' && e.key <= '6') { slot = parseInt(e.key)-1; drawUI(); }
 });
 document.addEventListener('keyup', e => keys[e.code] = false);
