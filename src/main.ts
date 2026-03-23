@@ -6,7 +6,7 @@ const CHUNK_SIZE = 14;
 let renderDist = 2;
 let spawnAnimals = true;
 let isDev = false;
-let time = 1000; // Mula pada pukul 10:00 AM
+let time = 1000; 
 
 // --- 12H TIME SYSTEM ---
 const getTimeStr = () => {
@@ -14,7 +14,7 @@ const getTimeStr = () => {
     const m = Math.floor((time % 100) * 0.6);
     const ampm = h >= 12 ? 'PM' : 'AM';
     h = h % 12;
-    h = h ? h : 12; // Jam 0 jadi 12
+    h = h ? h : 12;
     return `${h}:${m.toString().padStart(2, '0')} ${ampm}`;
 };
 
@@ -97,7 +97,8 @@ const genChunk = (cx:number, cz:number) => {
 // --- ANIMALS ---
 const animals: any[] = [];
 const spawnA = (x:number, y:number, z:number) => {
-    const type = ['cow', 'sheep', 'bird'][Math.floor(Math.random()*3)];
+    const types = ['cow', 'sheep', 'bird'];
+    const type = types[Math.floor(Math.random()*types.length)] as string;
     const s = type==='bird'?0.3:0.6;
     const m = new THREE.Mesh(new THREE.BoxGeometry(s,s,s), mats[type]);
     m.position.set(x, y, z);
@@ -113,11 +114,15 @@ ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(
 document.body.appendChild(ui);
 
 const drawUI = () => {
-    ui.innerHTML = inv.map((item, i) => `
+    ui.innerHTML = inv.map((item, i) => {
+        const material = mats[item as string];
+        const color = material ? `#${material.color.getHexString()}` : '#fff';
+        return `
         <div style="width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
-            <div style="width:22px; height:22px; background:#${mats[item].color.getHexString()}; border-radius:4px;"></div>
+            <div style="width:22px; height:22px; background:${color}; border-radius:4px;"></div>
             <span style="font-size:10px; color:white; font-weight:bold; margin-top:2px;">${i+1}</span>
-        </div>`).join('');
+        </div>`;
+    }).join('');
 };
 drawUI();
 
@@ -142,7 +147,10 @@ settingsMenu.innerHTML = `
         <input type="range" id="t-range" style="width:100%" min="0" max="2400" value="1000">
     </div>
     <div style="display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-bottom:15px;">
-        ${[1,2,3,4].map(n => `<button onclick="window.saveG(${n})" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE ${n}</button><button onclick="window.loadG(${n})" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD ${n}</button>`).join('')}
+        <button onclick="window.saveG(1)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 1</button><button onclick="window.loadG(1)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 1</button>
+        <button onclick="window.saveG(2)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 2</button><button onclick="window.loadG(2)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 2</button>
+        <button onclick="window.saveG(3)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 3</button><button onclick="window.loadG(3)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 3</button>
+        <button onclick="window.saveG(4)" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 4</button><button onclick="window.loadG(4)" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 4</button>
     </div>
     <button onclick="window.toggleSet()" style="width:100%; padding:10px; background:#4CAF50; border:none; color:white; border-radius:8px; cursor:pointer; font-weight:bold;">RESUME GAME</button>
 `;
@@ -158,7 +166,8 @@ document.getElementById('dev-btn')?.addEventListener('click', (e:any) => {
     isDev = !isDev;
     e.target.innerText = `DEV MODE: ${isDev?'ON':'OFF'}`;
     e.target.style.background = isDev ? '#4CAF50' : '#444';
-    document.getElementById('dev-opts')!.style.display = isDev?'block':'none';
+    const opts = document.getElementById('dev-opts');
+    if(opts) opts.style.display = isDev?'block':'none';
 });
 
 document.getElementById('t-range')?.addEventListener('input', (e:any) => { time = parseInt(e.target.value); });
@@ -190,10 +199,9 @@ function animate() {
     if (now > lastF + 1000) { fpsDisplay.innerText = `FPS: ${frames}`; frames = 0; lastF = now; }
 
     if (ctrl.isLocked) {
-        time = (time + 0.003) % 2400; // ~12-14 min per hour
+        time = (time + 0.003) % 2400; 
         clock.innerText = getTimeStr();
 
-        // Update Sky & Sun
         const dayInt = Math.max(0.1, Math.sin((time / 2400) * Math.PI) * 1.2);
         scene.background = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.5);
         ambient.intensity = dayInt * 0.7;
@@ -208,7 +216,6 @@ function animate() {
             }
         }
 
-        // Physics
         velY -= 0.01; camera.position.y += velY;
         const ground = `${Math.round(camera.position.x)},${Math.round(camera.position.y-1.8)},${Math.round(camera.position.z)}`;
         if (blocks.has(ground)) { camera.position.y = Math.round(camera.position.y-1.8)+1.8; velY=0; if(keys['Space']) velY=0.2; }
@@ -219,7 +226,6 @@ function animate() {
         if(keys['KeyA']) ctrl.moveRight(-speed);
         if(keys['KeyD']) ctrl.moveRight(speed);
 
-        // Update Animals
         animals.forEach(a => {
             if (a.t-- <= 0) { a.t = 100+Math.random()*100; a.v.set((Math.random()-0.5)*0.02, 0, (Math.random()-0.5)*0.02); }
             a.m.position.add(a.v);
