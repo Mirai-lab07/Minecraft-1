@@ -176,10 +176,13 @@ document.addEventListener('keyup', e => keys[e.code] = false);
 
 document.getElementById('resume-btn')?.addEventListener('click', () => (window as any).toggleSet());
 
-document.getElementById('rd-range')?.addEventListener('input', (e:any) => {
-    renderDist = parseInt(e.target.value);
-    const val = document.getElementById('rd-val');
-    if(val) val.innerText = e.target.value;
+document.getElementById('rd-range')?.addEventListener('input', (e: Event) => {
+    const target = e.target as HTMLInputElement;
+    if (target) {
+        renderDist = parseInt(target.value);
+        const val = document.getElementById('rd-val');
+        if (val) val.innerText = target.value;
+    }
 });
 
 document.getElementById('tex-btn')?.addEventListener('click', () => {
@@ -203,7 +206,10 @@ document.getElementById('dev-btn')?.addEventListener('click', () => {
     if(opts) opts.style.display = isDev?'block':'none';
 });
 
-document.getElementById('t-range')?.addEventListener('input', (e:any) => { time = parseInt(e.target.value); });
+document.getElementById('t-range')?.addEventListener('input', (e: Event) => {
+    const target = e.target as HTMLInputElement;
+    if (target) time = parseInt(target.value);
+});
 
 (window as any).saveG = (s:number) => {
     const data = { p:camera.position.toArray(), b:Array.from(blocks.values()).map(m => ({p:m.position.toArray(), t:m.userData.type})), t:time };
