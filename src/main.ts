@@ -1,12 +1,39 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+import { PerlinNoise } from './noise.js';
 
 // --- CONFIG ---
 const CHUNK_SIZE = 14;
+const CHUNK_HEIGHT = 32;
 let renderDist = 2;
 let useTextures = true;
 let isDev = false;
 let time = 1000; 
+
+enum BlockType {
+    AIR = 0,
+    GRASS = 1,
+    DIRT = 2,
+    STONE = 3,
+    WOOD = 4,
+    LEAVES = 5,
+    SAND = 6,
+    WATER = 7
+}
+
+const idToName: Record<number, string> = {
+    [BlockType.GRASS]: 'grass',
+    [BlockType.DIRT]: 'dirt',
+    [BlockType.STONE]: 'stone',
+    [BlockType.WOOD]: 'wood',
+    [BlockType.LEAVES]: 'leaves',
+    [BlockType.SAND]: 'sand',
+    [BlockType.WATER]: 'water'
+};
+
+const nameToId: Record<string, number> = Object.fromEntries(
+    Object.entries(idToName).map(([id, name]) => [name, parseInt(id)])
+);
 
 // --- 12H TIME SYSTEM ---
 const getTimeStr = () => {
@@ -55,36 +82,143 @@ const mats: Record<string, THREE.MeshLambertMaterial> = {
     wood: new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 }),
     leaves: new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent:true, opacity:0.8 }),
     sand: new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d }),
-    water: new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent:true, opacity:0.6 }),
-    cow: new THREE.MeshLambertMaterial({ color: 0x4b3621 }),
-    sheep: new THREE.MeshLambertMaterial({ color: 0xffffff }),
-    bird: new THREE.MeshLambertMaterial({ color: 0xcccccc })
+    water: new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent:true, opacity:0.6 })
 };
 
-// --- WORLD GEN ---
-const blocks = new Map<string, THREE.Mesh>();
-const chunks = new Set<string>();
+// --- WORLD DATA ---
+const world = new Map<string, Uint8Array>();
+const chunkGroups = new Map<string, THREE.Group>();
 const box = new THREE.BoxGeometry(1, 1, 1);
+const noise = new PerlinNoise();
+const tempMatrix = new THREE.Matrix4();
 
-const addB = (x:number, y:number, z:number, type:string) => {
-    const k = `${Math.round(x)},${Math.round(y)},${Math.round(z)}`;
-    if (blocks.has(k)) return;
-    const material = mats[type] || mats.grass;
-    const m = new THREE.Mesh(box, material);
-    m.position.set(x,y,z);
-    m.userData.type = type;
-    scene.add(m);
-    blocks.set(k, m);
+const getChunkCoord = (x: number, z: number) => {
+    return {
+        cx: Math.floor(x / CHUNK_SIZE),
+        cz: Math.floor(z / CHUNK_SIZE),
+        rx: ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE,
+        rz: ((z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE
+    };
 };
 
-const genChunk = (cx:number, cz:number) => {
-    for(let x=cx*CHUNK_SIZE; x<(cx+1)*CHUNK_SIZE; x++) {
-        for(let z=cz*CHUNK_SIZE; z<(cz+1)*CHUNK_SIZE; z++) {
-            const h = Math.floor(Math.sin(x*0.1)*3 + Math.cos(z*0.1)*3) + 4;
-            for(let y=h-1; y<=h; y++) addB(x, y, z, y===h ? (h<3?'sand':'grass') : 'dirt');
-            if (h<3) addB(x, 3, z, 'water');
+const getBlock = (x: number, y: number, z: number): number => {
+    if (y < 0 || y >= CHUNK_HEIGHT) return BlockType.AIR;
+    const { cx, cz, rx, rz } = getChunkCoord(x, z);
+    const chunk = world.get(`${cx},${cz}`);
+    if (!chunk) return BlockType.AIR;
+    return chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] || BlockType.AIR;
+};
+
+const setBlock = (x: number, y: number, z: number, type: number) => {
+    if (y < 0 || y >= CHUNK_HEIGHT) return;
+    const { cx, cz, rx, rz } = getChunkCoord(x, z);
+    const key = `${cx},${cz}`;
+    let chunk = world.get(key);
+    if (!chunk) {
+        chunk = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+        world.set(key, chunk);
+    }
+    chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = type;
+    meshChunk(cx, cz);
+};
+
+const meshChunk = (cx: number, cz: number) => {
+    const key = `${cx},${cz}`;
+    const chunk = world.get(key);
+    if (!chunk) return;
+
+    let group = chunkGroups.get(key);
+    if (group) {
+        group.clear();
+    } else {
+        group = new THREE.Group();
+        group.position.set(cx * CHUNK_SIZE, 0, cz * CHUNK_SIZE);
+        scene.add(group);
+        chunkGroups.set(key, group);
+    }
+
+    const typeCounts: Record<number, number> = {};
+    for (let i = 0; i < chunk.length; i++) {
+        const type = chunk[i]!;
+        if (type !== BlockType.AIR) {
+            typeCounts[type] = (typeCounts[type] || 0) + 1;
         }
     }
+
+    for (const [typeStr, count] of Object.entries(typeCounts)) {
+        const type = parseInt(typeStr);
+        const name = idToName[type]!;
+        const mesh = new THREE.InstancedMesh(box, mats[name]!, count);
+        let idx = 0;
+        for (let rx = 0; rx < CHUNK_SIZE; rx++) {
+            for (let rz = 0; rz < CHUNK_SIZE; rz++) {
+                for (let ry = 0; ry < CHUNK_HEIGHT; ry++) {
+                    if (chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + ry] === type) {
+                        tempMatrix.setPosition(rx, ry, rz);
+                        mesh.setMatrixAt(idx++, tempMatrix);
+                    }
+                }
+            }
+        }
+        group.add(mesh);
+    }
+};
+
+const genChunk = (cx: number, cz: number) => {
+    const key = `${cx},${cz}`;
+    if (world.has(key)) return;
+    const chunk = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+    world.set(key, chunk);
+
+    for (let rx = 0; rx < CHUNK_SIZE; rx++) {
+        for (let rz = 0; rz < CHUNK_SIZE; rz++) {
+            const x = cx * CHUNK_SIZE + rx;
+            const z = cz * CHUNK_SIZE + rz;
+            const n = noise.noise(x * 0.05, z * 0.05, 0) * 6 + noise.noise(x * 0.1, z * 0.1, 100) * 3;
+            const h = Math.floor(n + 6);
+
+            for (let y = 0; y <= h && y < CHUNK_HEIGHT; y++) {
+                let type = BlockType.STONE;
+                if (y === h) type = h < 4 ? BlockType.SAND : BlockType.GRASS;
+                else if (y > h - 3) type = BlockType.DIRT;
+                chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = type;
+            }
+
+            if (h < 4) {
+                for (let y = h + 1; y <= 3; y++) {
+                    chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = BlockType.WATER;
+                }
+            }
+
+            // Simple Tree Gen (probabilistic)
+            if (h >= 4 && Math.random() < 0.015) {
+                const th = 4 + Math.floor(Math.random() * 2);
+                for(let ty=1; ty<=th; ty++) {
+                    const tyy = h + ty;
+                    if (tyy < CHUNK_HEIGHT) chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + tyy] = BlockType.WOOD;
+                }
+                // Leaves (simplified for now to stay within chunk boundaries easily)
+                for(let lx=-2; lx<=2; lx++) {
+                    for(let lz=-2; lz<=2; lz++) {
+                        for(let ly=th-1; ly<=th+1; ly++) {
+                            const tyy = h + ly;
+                            if (tyy >= CHUNK_HEIGHT) continue;
+                            const rrx = rx + lx;
+                            const rrz = rz + lz;
+                            if (rrx >= 0 && rrx < CHUNK_SIZE && rrz >= 0 && rrz < CHUNK_SIZE) {
+                                if (Math.abs(lx) + Math.abs(lz) < 3 && !(lx===0 && lz===0 && ly<th+1)) {
+                                    if (chunk[rrx * CHUNK_SIZE * CHUNK_HEIGHT + rrz * CHUNK_HEIGHT + tyy] === BlockType.AIR) {
+                                        chunk[rrx * CHUNK_SIZE * CHUNK_HEIGHT + rrz * CHUNK_HEIGHT + tyy] = BlockType.LEAVES;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    meshChunk(cx, cz);
 };
 
 // --- UI & INVENTORY ---
@@ -123,12 +257,6 @@ settingsMenu.innerHTML = `
         <div style="font-size:10px; opacity:0.5; margin-bottom:5px;">TIME CONTROL</div>
         <input type="range" id="t-range" style="width:100%" min="0" max="2400" value="1000">
     </div>
-    <div style="display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-bottom:15px;">
-        <button id="btn-s1" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 1</button>
-        <button id="btn-l1" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 1</button>
-        <button id="btn-s2" style="background:#4CAF50; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">SAVE 2</button>
-        <button id="btn-l2" style="background:#666; color:white; padding:8px; border:none; border-radius:5px; font-size:10px; cursor:pointer;">LOAD 2</button>
-    </div>
     <button id="resume-btn" style="width:100%; padding:12px; background:#4CAF50; border:none; color:white; border-radius:8px; cursor:pointer; font-weight:bold;">RESUME GAME</button>
 `;
 document.body.appendChild(settingsMenu);
@@ -149,7 +277,15 @@ document.addEventListener('keydown', e => {
     if (e.key >= '1' && e.key <= '6') { slot = parseInt(e.key)-1; drawUI(); }
 });
 document.addEventListener('keyup', e => keys[e.code] = false);
-document.addEventListener('mousedown', () => { if(settingsMenu.style.display !== 'block') ctrl.lock(); });
+document.addEventListener('mousedown', (e) => { 
+    if(settingsMenu.style.display !== 'block') {
+        ctrl.lock();
+        if (ctrl.isLocked) {
+            // Basic block break/place logic can be added here
+            // For now just locking the pointer
+        }
+    } 
+});
 
 // Event Listeners
 document.getElementById('resume-btn')?.addEventListener('click', toggleSettings);
@@ -181,28 +317,6 @@ document.getElementById('t-range')?.addEventListener('input', (e: Event) => {
     if (target) time = parseInt(target.value);
 });
 
-// Save/Load Handlers
-const saveGame = (s: number) => {
-    const data = { p:camera.position.toArray(), b:Array.from(blocks.values()).map(m => ({p:m.position.toArray(), t:m.userData.type})), t:time };
-    localStorage.setItem('mc_save_'+s, JSON.stringify(data));
-    alert('Game Saved to Slot '+s);
-};
-const loadGame = (s: number) => {
-    const raw = localStorage.getItem('mc_save_'+s);
-    if (!raw) return alert('Slot Empty!');
-    const d = JSON.parse(raw);
-    blocks.forEach(m => { scene.remove(m); m.geometry.dispose(); }); 
-    blocks.clear(); chunks.clear();
-    d.b.forEach((b:any) => addB(b.p[0], b.p[1], b.p[2], b.t));
-    camera.position.fromArray(d.p); time = d.t;
-    toggleSettings();
-};
-
-document.getElementById('btn-s1')?.addEventListener('click', () => saveGame(1));
-document.getElementById('btn-l1')?.addEventListener('click', () => loadGame(1));
-document.getElementById('btn-s2')?.addEventListener('click', () => saveGame(2));
-document.getElementById('btn-l2')?.addEventListener('click', () => loadGame(2));
-
 // --- GAME LOOP & PHYSICS ---
 let velY = 0, lastF = performance.now(), frames = 0;
 camera.position.set(0, 15, 0);
@@ -226,21 +340,38 @@ function animate() {
         const cz = Math.floor(camera.position.z / CHUNK_SIZE);
         for(let x=-renderDist; x<=renderDist; x++) {
             for(let z=-renderDist; z<=renderDist; z++) {
-                const k = `${cx+x},${cz+z}`;
-                if(!chunks.has(k)) { genChunk(cx+x, cz+z); chunks.add(k); }
+                genChunk(cx+x, cz+z);
             }
         }
 
-        // Physics
+        // Improved Physics
         velY -= 0.008; 
         camera.position.y += velY;
-        const px = Math.round(camera.position.x);
-        const pz = Math.round(camera.position.z);
-        const py = Math.floor(camera.position.y - 1.7); 
-        const footBlock = blocks.get(`${px},${py},${pz}`);
+
+        const px = camera.position.x;
+        const py = camera.position.y;
+        const pz = camera.position.z;
+
+        // Bounding box check (simplified)
+        const checkPoints = [
+            [px-0.3, py-1.7, pz-0.3], [px+0.3, py-1.7, pz-0.3],
+            [px-0.3, py-1.7, pz+0.3], [px+0.3, py-1.7, pz+0.3]
+        ] as const;
+
+        let onGround = false;
+        for (const p of checkPoints) {
+            const b = getBlock(Math.round(p[0]), Math.floor(p[1]), Math.round(p[2]));
+            if (b !== BlockType.AIR && b !== BlockType.WATER) {
+                onGround = true; break;
+            }
+        }
         
-        if (footBlock && footBlock.userData.type !== 'water') {
-            if (velY < 0) { camera.position.y = py + 1.8; velY = 0; if(keys['Space']) velY = 0.15; }
+        if (onGround) {
+            if (velY < 0) { 
+                camera.position.y = Math.floor(py - 1.7) + 1.8; 
+                velY = 0; 
+                if(keys['Space']) velY = 0.15; 
+            }
         }
 
         const speed = keys['ShiftLeft'] ? 0.2 : 0.12;
