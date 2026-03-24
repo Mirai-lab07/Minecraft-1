@@ -50,7 +50,12 @@ const mats: Record<string, THREE.MeshLambertMaterial> = {}; // Initialized later
 let isGameStarted = false;
 let isSettingsOpen = false;
 let isFlying = false;
+let useGyro = false;
 let spaceTimer: any = null;
+const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+let gyroOffset = { x: 0, y: 0 };
+let joystickPos = { x: 0, y: 0 };
+let joystickActive = false;
 const world = new Map<string, Uint8Array>();
 const chunkGroups = new Map<string, THREE.Group>();
 const box = new THREE.BoxGeometry(1, 1, 1);
@@ -333,6 +338,49 @@ createSetting('Brightness', 0, 100, 60, (v) => { ambient.intensity = (v / 100); 
 createSetting('Chunk Width', 8, 24, CHUNK_SIZE, (v) => { CHUNK_SIZE = v; resetWorld(); });
 createSetting('Chunk Height', 16, 64, CHUNK_HEIGHT, (v) => { CHUNK_HEIGHT = v; resetWorld(); });
 
+const gyroRow = document.createElement('div');
+gyroRow.style.cssText = 'width:300px; display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;';
+const gyroLabel = document.createElement('label');
+gyroLabel.innerText = 'Gyroscope Control: OFF';
+const gyroBtn = document.createElement('button');
+gyroBtn.innerText = 'ENABLE';
+gyroBtn.style.cssText = 'padding:5px 15px; background:#444; color:white; border:none; border-radius:5px; cursor:pointer;';
+gyroBtn.onclick = async () => {
+    if (!useGyro) {
+        if (typeof (DeviceOrientationEvent as any).requestPermission === 'function') {
+            const res = await (DeviceOrientationEvent as any).requestPermission();
+            if (res !== 'granted') return alert('Gyro permission denied');
+        }
+        useGyro = true;
+        gyroBtn.innerText = 'DISABLE';
+        gyroBtn.style.background = '#4CAF50';
+        gyroLabel.innerText = 'Gyroscope Control: ON';
+    } else {
+        useGyro = false;
+        gyroBtn.innerText = 'ENABLE';
+        gyroBtn.style.background = '#444';
+        gyroLabel.innerText = 'Gyroscope Control: OFF';
+    }
+};
+gyroRow.appendChild(gyroLabel); gyroRow.appendChild(gyroBtn);
+settingsScreen.appendChild(gyroRow);
+
+window.addEventListener('deviceorientation', (e) => {
+    if (!useGyro || !isGameStarted || isSettingsOpen) return;
+    // Map beta (X) and gamma (Y) to camera rotation
+    // Beta is tilt front/back (-180 to 180), Gamma is tilt left/right (-90 to 90)
+    const beta = e.beta || 0; 
+    const gamma = e.gamma || 0;
+    
+    // Smooth gyro input
+    const targetX = (beta - 45) * 0.02; // Offset 45deg for comfortable holding
+    const targetY = -gamma * 0.02;
+    
+    camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, targetX, 0.1);
+    camera.rotation.y = THREE.MathUtils.lerp(camera.rotation.y, targetY, 0.1);
+    camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x));
+});
+
 const houseTitle = document.createElement('h3');
 houseTitle.innerText = 'AUTO GENERATE HOUSE';
 houseTitle.style.marginTop = '20px';
@@ -498,8 +546,14 @@ for(let x=-renderDist; x<=renderDist; x++) {
 }
 
 const clockDisplay = document.createElement('div');
-clockDisplay.style.cssText = 'position:fixed; top:15px; right:15px; color:white; font-family:monospace; font-size:22px; font-weight:bold; z-index:20;';
+clockDisplay.style.cssText = 'position:fixed; top:15px; right:60px; color:white; font-family:monospace; font-size:22px; font-weight:bold; z-index:20;';
 document.body.appendChild(clockDisplay);
+
+const settingsIcon = document.createElement('div');
+settingsIcon.style.cssText = 'position:fixed; top:12px; right:15px; width:35px; height:35px; background:rgba(0,0,0,0.5); border-radius:8px; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:20; color:white; font-size:20px; border:1px solid rgba(255,255,255,0.3);';
+settingsIcon.innerHTML = '⚙️';
+settingsIcon.onclick = (e) => { e.stopPropagation(); toggleSettings(); };
+document.body.appendChild(settingsIcon);
 
 const fpsDisplay = document.createElement('div');
 fpsDisplay.style.cssText = 'position:fixed; top:15px; left:15px; color:lime; font-family:monospace; font-size:12px; z-index:20;';
@@ -516,18 +570,112 @@ const hand = document.createElement('div');
 hand.style.cssText = 'position:fixed; bottom:-20px; right:10%; width:250px; height:300px; background:#d2b48c; border:10px solid #bc8f8f; border-radius:40px 40px 0 0; transform: rotate(-10deg); z-index:50; transition: 0.1s;';
 document.body.appendChild(hand);
 
+// --- JOYSTICK & TOUCH UI ---
+if (isTouchDevice) {
+    const joyContainer = document.createElement('div');
+    joyContainer.style.cssText = 'position:fixed; bottom:50px; left:50px; width:120px; height:120px; background:rgba(255,255,255,0.2); border-radius:50%; z-index:100; touch-action:none;';
+    document.body.appendChild(joyContainer);
+
+    const joyKnob = document.createElement('div');
+    joyKnob.style.cssText = 'position:absolute; top:35px; left:35px; width:50px; height:50px; background:white; border-radius:50%; opacity:0.5; pointer-events:none; transition: 0.1s;';
+    joyContainer.appendChild(joyKnob);
+
+    const jumpBtn = document.createElement('div');
+    jumpBtn.style.cssText = 'position:fixed; bottom:50px; right:50px; width:80px; height:80px; background:rgba(255,255,255,0.3); border-radius:50%; z-index:100; display:flex; align-items:center; justify-content:center; font-weight:bold; color:white; touch-action:none;';
+    jumpBtn.innerText = 'JUMP';
+    document.body.appendChild(jumpBtn);
+
+    const settingsBtnTouch = document.createElement('div');
+    settingsBtnTouch.style.cssText = 'position:fixed; top:20px; left:50%; transform:translateX(-50%); padding:10px 20px; background:rgba(0,0,0,0.5); color:white; border-radius:10px; z-index:100;';
+    settingsBtnTouch.innerText = 'SETTINGS';
+    document.body.appendChild(settingsBtnTouch);
+    settingsBtnTouch.onclick = () => toggleSettings();
+
+    const handleTouch = (e: TouchEvent) => {
+        const touch = e.targetTouches[0]!; // Use targetTouches for joystick context
+        const rect = joyContainer.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const dx = touch.clientX - centerX;
+        const dy = touch.clientY - centerY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const maxDist = 60;
+        const ratio = Math.min(dist, maxDist) / maxDist;
+        const angle = Math.atan2(dy, dx);
+        
+        joystickPos.x = Math.cos(angle) * ratio;
+        joystickPos.y = Math.sin(angle) * ratio;
+        joyKnob.style.transform = `translate(${joystickPos.x * 40}px, ${joystickPos.y * 40}px)`;
+        joystickActive = true;
+    };
+
+    joyContainer.addEventListener('touchstart', (e) => { e.stopPropagation(); handleTouch(e); });
+    joyContainer.addEventListener('touchmove', (e) => { e.preventDefault(); e.stopPropagation(); handleTouch(e); });
+    joyContainer.addEventListener('touchend', (e) => {
+        e.stopPropagation();
+        joystickPos = { x: 0, y: 0 };
+        joyKnob.style.transform = 'translate(0,0)';
+        joystickActive = false;
+    });
+
+    jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); e.stopPropagation(); keys['Space'] = true; });
+    jumpBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); keys['Space'] = false; });
+
+    // Touch View Control (Improved Multi-Touch)
+    let lookTouchId: number | null = null;
+    let lastTouchX = 0, lastTouchY = 0;
+
+    renderer.domElement.addEventListener('touchstart', (e) => {
+        if (lookTouchId === null) {
+            const touch = e.changedTouches[0]!;
+            lookTouchId = touch.identifier;
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+        }
+    }, { passive: false });
+
+    renderer.domElement.addEventListener('touchmove', (e) => {
+        if (isGameStarted && !isSettingsOpen) {
+            for (let i = 0; i < e.changedTouches.length; i++) {
+                const touch = e.changedTouches[i]!;
+                if (touch.identifier === lookTouchId) {
+                    const dx = touch.clientX - lastTouchX;
+                    const dy = touch.clientY - lastTouchY;
+                    camera.rotation.y -= dx * 0.005;
+                    camera.rotation.x -= dy * 0.005;
+                    camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x));
+                    lastTouchX = touch.clientX;
+                    lastTouchY = touch.clientY;
+                    e.preventDefault();
+                }
+            }
+        }
+    }, { passive: false });
+
+    renderer.domElement.addEventListener('touchend', (e) => {
+        for (let i = 0; i < e.changedTouches.length; i++) {
+            if (e.changedTouches[i]!.identifier === lookTouchId) {
+                lookTouchId = null;
+            }
+        }
+    });
+}
+
 const ui = document.createElement('div');
-ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; z-index:10;';
+ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; z-index:100; pointer-events:auto;';
 document.body.appendChild(ui);
 
 const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
 let slot = 0;
 const drawUI = () => {
-    ui.innerHTML = inv.map((item, i) => `
-        <div style="width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
-            <div style="width:22px; height:22px; background:#${mats[item]!.color.getHexString()}; border-radius:4px;"></div>
-            <span style="font-size:10px; color:white;">${i+1}</span>
-        </div>`).join('');
+    ui.innerHTML = '';
+    inv.forEach((item, i) => {
+        const s = document.createElement('div');
+        s.style.cssText = `width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer;`;
+        s.innerHTML = `<div style="width:22px; height:22px; background:#${mats[item]!.color.getHexString()}; border-radius:4px; pointer-events:none;"></div><span style="font-size:10px; color:white; pointer-events:none;">${i+1}</span>`;
+        s.onclick = (e) => { e.stopPropagation(); slot = i; drawUI(); };
+        ui.appendChild(s);
+    });
     // Update hand color to match selected block
     hand.style.background = `#${mats[inv[slot]!]!.color.getHexString()}`;
 };
@@ -560,7 +708,7 @@ function animate() {
     frames++;
     if (now > lastF + 1000) { fpsDisplay.innerText = `FPS: ${frames}`; frames = 0; lastF = now; }
 
-    if (ctrl.isLocked) {
+    if (ctrl.isLocked || isTouchDevice) {
         time = (time + 0.003) % 2400; 
         clockDisplay.innerText = getTimeStr();
 
@@ -580,6 +728,12 @@ function animate() {
             if (keys['Space']) camera.position.y += 0.15;
             if (keys['ArrowDown']) camera.position.y -= 0.15;
             
+            if (joystickActive) {
+                const spd = 0.15;
+                ctrl.moveForward(-joystickPos.y * spd);
+                ctrl.moveRight(joystickPos.x * spd);
+            }
+
             hand.style.transform = `rotate(-10deg) translateY(${Math.sin(now * 0.005) * 10}px)`;
         } else {
             velY -= 0.008; 
@@ -607,7 +761,7 @@ function animate() {
                 camera.position.y = nextY;
             }
             
-            if (keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD']) {
+            if (keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] || joystickActive) {
                 hand.style.transform = `rotate(-10deg) translateY(${Math.abs(Math.sin(now * 0.01)) * 20}px)`;
             } else {
                 hand.style.transform = `rotate(-10deg) translateY(0px)`;
@@ -623,6 +777,11 @@ function animate() {
         if(keys['KeyS']) ctrl.moveForward(-speed);
         if(keys['KeyA']) ctrl.moveRight(-speed);
         if(keys['KeyD']) ctrl.moveRight(speed);
+
+        if (joystickActive && !isFlying) {
+            ctrl.moveForward(-joystickPos.y * speed);
+            ctrl.moveRight(joystickPos.x * speed);
+        }
 
         const newX = camera.position.x;
         const newZ = camera.position.z;
