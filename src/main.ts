@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { PerlinNoise } from './noise.js';
 
 // --- CONFIG ---
@@ -9,6 +10,191 @@ let renderDist = 2;
 let useTextures = true;
 let isDev = false;
 let time = 1000; 
+
+// Hunger System
+let hunger = 100;
+const hungerDecreaseRate = 0.05; // per frame/second
+let lastHungerUpdate = performance.now();
+
+const foodModels = [
+    'apple.glb', 'banana.glb', 'burger.glb', 'cheese.glb', 'hot-dog.glb', 'pizza.glb'
+];
+const characterModels = [
+    'character-a.glb', 'character-b.glb', 'character-c.glb'
+];
+
+const modelCache: Record<string, THREE.Group> = {};
+const loader = new GLTFLoader();
+interface Entity {
+    id: string;
+    type: 'food' | 'character';
+    modelName: string;
+    mesh: THREE.Object3D;
+    chunkKey: string;
+    // Movement & Physics
+    targetPos?: THREE.Vector3;
+    moveTimer?: number;
+    velY: number;
+    onGround: boolean;
+    job?: 'farming' | 'mining' | 'building' | 'pathmaking' | 'idle' | undefined;
+}
+const entities = new Map<string, Entity[]>();
+const playerInventory = new Map<string, number>();
+let isInventoryOpen = false;
+
+// Block Breaking State
+let breakingBlock: { x: number, y: number, z: number, startTime: number } | null = null;
+const breakDuration = 1000; // 1 second
+
+const breakProgressCircle = document.createElement('div');
+breakProgressCircle.style.cssText = 'position:fixed; top:50%; left:50%; width:40px; height:40px; transform:translate(-50%, -50%); border:4px solid rgba(255,255,255,0.3); border-top:4px solid #fff; border-radius:50%; display:none; z-index:1000; pointer-events:none;';
+document.body.appendChild(breakProgressCircle);
+
+const inventoryScreen = document.createElement('div');
+inventoryScreen.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%, -50%); width:600px; height:500px; background:rgba(0,0,0,0.7); backdrop-filter:blur(10px); border:2px solid rgba(255,255,255,0.2); border-radius:20px; display:none; flex-direction:column; z-index:2500; color:white; font-family:monospace; padding:20px; box-shadow: 0 0 30px rgba(0,0,0,0.5);';
+document.body.appendChild(inventoryScreen);
+
+// Top Section: Character & Crafting
+const topSection = document.createElement('div');
+topSection.style.cssText = 'display:flex; justify-content:space-between; width:100%; height:200px; margin-bottom:20px;';
+inventoryScreen.appendChild(topSection);
+
+// Character Preview Canvas
+const charCanvas = document.createElement('canvas');
+charCanvas.width = 200; charCanvas.height = 200;
+charCanvas.style.cssText = 'background:rgba(255,255,255,0.05); border-radius:15px; border:1px solid rgba(255,255,255,0.1);';
+topSection.appendChild(charCanvas);
+
+// Crafting Section
+const craftingSection = document.createElement('div');
+craftingSection.style.cssText = 'display:flex; align-items:center; gap:20px; padding:20px; background:rgba(0,0,0,0.3); border-radius:15px;';
+topSection.appendChild(craftingSection);
+
+const craftingGrid = document.createElement('div');
+craftingGrid.style.cssText = 'display:grid; grid-template-columns: repeat(2, 1fr); gap:8px;';
+for(let i=0; i<4; i++) {
+    const slot = document.createElement('div');
+    slot.style.cssText = 'width:50px; height:50px; background:rgba(255,255,255,0.1); border:1px solid #555; border-radius:5px;';
+    craftingGrid.appendChild(slot);
+}
+craftingSection.appendChild(craftingGrid);
+
+const arrow = document.createElement('div');
+arrow.innerText = '➡'; arrow.style.fontSize = '30px';
+craftingSection.appendChild(arrow);
+
+const resultSlot = document.createElement('div');
+resultSlot.style.cssText = 'width:65px; height:65px; background:rgba(255,255,255,0.15); border:2px solid #4CAF50; border-radius:8px;';
+craftingSection.appendChild(resultSlot);
+
+// Bottom Section: 3x8 Inventory
+const invGrid = document.createElement('div');
+invGrid.style.cssText = 'display:grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(3, 1fr); gap:10px; width:100%; flex-grow:1; background:rgba(0,0,0,0.2); padding:15px; border-radius:15px;';
+inventoryScreen.appendChild(invGrid);
+
+// Character Preview Renderer
+const charRenderer = new THREE.WebGLRenderer({ canvas: charCanvas, alpha: true, antialias: true });
+const charScene = new THREE.Scene();
+const charCam = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+charCam.position.set(0, 1.2, 3);
+charCam.lookAt(0, 1, 0);
+const charLight = new THREE.PointLight(0xffffff, 2);
+charLight.position.set(2, 2, 5);
+charScene.add(charLight);
+charScene.add(new THREE.AmbientLight(0xffffff, 0.8));
+
+let charPreviewMesh: THREE.Object3D | null = null;
+
+const toggleInventory = () => {
+    isInventoryOpen = !isInventoryOpen;
+    inventoryScreen.style.display = isInventoryOpen ? 'flex' : 'none';
+    if (isInventoryOpen) {
+        ctrl.unlock();
+        if (!charPreviewMesh && modelCache['character-a.glb']) {
+            charPreviewMesh = modelCache['character-a.glb'].clone();
+            charScene.add(charPreviewMesh);
+        }
+        drawInventory();
+        animateCharPreview();
+    } else if (isGameStarted) {
+        ctrl.lock();
+    }
+};
+
+const animateCharPreview = () => {
+    if (!isInventoryOpen) return;
+    requestAnimationFrame(animateCharPreview);
+    if (charPreviewMesh) charPreviewMesh.rotation.y += 0.02;
+    charRenderer.render(charScene, charCam);
+};
+
+const drawInventory = () => {
+    invGrid.innerHTML = '';
+    const items = Array.from(playerInventory.entries());
+    // Total 24 slots (3x8)
+    for (let i = 0; i < 24; i++) {
+        const [itemName, count] = items[i] || [null, 0];
+        const slotDiv = document.createElement('div');
+        slotDiv.style.cssText = 'aspect-ratio:1/1; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:8px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer; font-size:10px; transition:0.1s; position:relative; color:white; overflow:hidden; text-align:center;';
+        
+        if (itemName) {
+            const isFood = itemName.endsWith('.glb');
+            if (isFood) {
+                let icon = '🍎';
+                if (itemName.includes('apple')) icon = '🍎';
+                else if (itemName.includes('banana')) icon = '🍌';
+                else if (itemName.includes('burger')) icon = '🍔';
+                else if (itemName.includes('cheese')) icon = '🧀';
+                else if (itemName.includes('hot-dog')) icon = '🌭';
+                else if (itemName.includes('pizza')) icon = '🍕';
+                slotDiv.innerHTML = `<div style="font-size:24px;">${icon}</div><div>${itemName.replace('.glb','')}</div>`;
+                
+                slotDiv.onclick = () => {
+                    updateHunger(25);
+                    const current = playerInventory.get(itemName) || 0;
+                    if (current > 1) playerInventory.set(itemName, current - 1);
+                    else playerInventory.delete(itemName);
+                    drawInventory();
+                };
+            } else {
+                // It's a block
+                slotDiv.innerHTML = `<div style="width:24px; height:24px; background:#${mats[itemName]?.color.getHexString() || 'fff'}; border-radius:4px; margin-bottom:4px;"></div><div>${itemName}</div>`;
+            }
+
+            // Count Badge
+            const badge = document.createElement('div');
+            badge.style.cssText = 'position:absolute; bottom:2px; right:5px; background:rgba(0,0,0,0.6); padding:1px 4px; border-radius:4px; font-size:10px; font-weight:bold;';
+            badge.innerText = count.toString();
+            slotDiv.appendChild(badge);
+
+            slotDiv.onmouseover = () => { slotDiv.style.background = 'rgba(255,255,255,0.15)'; slotDiv.style.borderColor = '#4CAF50'; };
+            slotDiv.onmouseout = () => { slotDiv.style.background = 'rgba(255,255,255,0.05)'; slotDiv.style.borderColor = 'rgba(255,255,255,0.1)'; };
+        }
+        invGrid.appendChild(slotDiv);
+    }
+};
+
+const loadModel = (url: string, name: string): Promise<THREE.Group> => {
+    return new Promise((resolve) => {
+        loader.load(url, (gltf) => {
+            modelCache[name] = gltf.scene;
+            resolve(gltf.scene);
+        });
+    });
+};
+
+const initAssets = async () => {
+    const promises = [];
+    for (const m of foodModels) {
+        promises.push(loadModel(`asset/kenney_food-kit/Models/GLB format/${m}`, m));
+    }
+    for (const m of characterModels) {
+        promises.push(loadModel(`asset/kenney_blocky-characters_20/Models/GLB format/${m}`, m));
+    }
+    await Promise.all(promises);
+    console.log('All assets loaded');
+};
+initAssets();
 
 const resetWorld = () => {
     world.clear();
@@ -31,7 +217,9 @@ enum BlockType {
     WOOD = 4,
     LEAVES = 5,
     SAND = 6,
-    WATER = 7
+    WATER = 7,
+    SILVER = 8,
+    DIAMOND = 9
 }
 
 const idToName: Record<number, string> = {
@@ -41,7 +229,9 @@ const idToName: Record<number, string> = {
     [BlockType.WOOD]: 'wood',
     [BlockType.LEAVES]: 'leaves',
     [BlockType.SAND]: 'sand',
-    [BlockType.WATER]: 'water'
+    [BlockType.WATER]: 'water',
+    [BlockType.SILVER]: 'silver',
+    [BlockType.DIAMOND]: 'diamond'
 };
 
 const mats: Record<string, THREE.MeshLambertMaterial> = {}; // Initialized later
@@ -102,6 +292,8 @@ mats['wood'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 });
 mats['leaves'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent:true, opacity:0.8 });
 mats['sand'] = new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d });
 mats['water'] = new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent:true, opacity:0.6 });
+mats['silver'] = new THREE.MeshLambertMaterial({ map: tex, color: 0xc0c0c0 });
+mats['diamond'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x00ffff });
 
 // --- WORLD LOGIC ---
 const getChunkCoord = (x: number, z: number) => {
@@ -163,6 +355,60 @@ const meshChunk = (cx: number, cz: number) => {
     }
 };
 
+const spawnEntities = (cx: number, cz: number, chunk: Uint8Array) => {
+    const key = `${cx},${cz}`;
+    if (entities.has(key)) return;
+    
+    const chunkEntities: Entity[] = [];
+    const jobs: ('farming' | 'mining' | 'building' | 'pathmaking' | 'idle')[] = ['farming', 'mining', 'building', 'pathmaking', 'idle'];
+
+    for (let i = 0; i < 3; i++) { 
+        if (Math.random() < 0.4) {
+            const rx = Math.floor(Math.random() * CHUNK_SIZE);
+            const rz = Math.floor(Math.random() * CHUNK_SIZE);
+            
+            let h = -1;
+            for (let y = CHUNK_HEIGHT - 1; y >= 0; y--) {
+                const type = chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y];
+                if (type !== BlockType.AIR && type !== BlockType.WATER && type !== BlockType.LEAVES) {
+                    h = y;
+                    break;
+                }
+            }
+            
+            if (h !== -1) {
+                const isCharacter = Math.random() < 0.4;
+                const type = isCharacter ? 'character' : 'food';
+                const modelList = isCharacter ? characterModels : foodModels;
+                const modelName = modelList[Math.floor(Math.random() * modelList.length)]!;
+                
+                const originalModel = modelCache[modelName];
+                if (originalModel) {
+                    const mesh = originalModel.clone();
+                    // Spawn at h but let physics handle the rest
+                    mesh.position.set(cx * CHUNK_SIZE + rx + 0.5, h + 5, cz * CHUNK_SIZE + rz + 0.5);
+                    if (isCharacter) mesh.scale.set(0.5, 0.5, 0.5);
+                    else mesh.scale.set(0.4, 0.4, 0.4);
+                    
+                    scene.add(mesh);
+                    chunkEntities.push({
+                        id: Math.random().toString(36).substr(2, 9),
+                        type,
+                        modelName,
+                        mesh,
+                        chunkKey: key,
+                        velY: 0,
+                        onGround: false,
+                        job: isCharacter ? jobs[Math.floor(Math.random() * jobs.length)] : undefined
+                    });
+                }
+            }
+        }
+    }
+    
+    entities.set(key, chunkEntities);
+};
+
 const genChunk = (cx: number, cz: number) => {
     const key = `${cx},${cz}`;
     if (world.has(key)) return;
@@ -173,36 +419,66 @@ const genChunk = (cx: number, cz: number) => {
         for (let rz = 0; rz < CHUNK_SIZE; rz++) {
             const x = cx * CHUNK_SIZE + rx;
             const z = cz * CHUNK_SIZE + rz;
+            
+            // Biome noise
+            const biomeNoise = noise.noise(x * 0.01, z * 0.01, 500);
+            const isDesert = biomeNoise > 0.3;
+
             const n = noise.noise(x * 0.05, z * 0.05, 0) * 6 + noise.noise(x * 0.1, z * 0.1, 100) * 3;
             const h = Math.floor(n + 6);
 
             for (let y = 0; y <= h && y < CHUNK_HEIGHT; y++) {
                 let type = BlockType.STONE;
-                if (y === h) type = h < 4 ? BlockType.SAND : BlockType.GRASS;
-                else if (y > h - 3) type = BlockType.DIRT;
+                if (y === h) {
+                    type = (h < 4 || isDesert) ? BlockType.SAND : BlockType.GRASS;
+                } else if (y > h - 3) {
+                    type = isDesert ? BlockType.SAND : BlockType.DIRT;
+                } else {
+                    // Deep layer ores
+                    const oreNoise = Math.random();
+                    if (y < 4 && oreNoise < 0.05) type = BlockType.DIAMOND;
+                    else if (y < 8 && oreNoise < 0.1) type = BlockType.SILVER;
+                }
                 chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = type;
             }
 
-            if (h < 4) {
+            if (h < 4 && !isDesert) {
                 for (let y = h + 1; y <= 3; y++) {
                     chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = BlockType.WATER;
                 }
             }
+            
+            // Trees only in non-desert
+            if (!isDesert && h >= 4 && Math.random() < 0.02) {
+                const treeType = Math.random();
+                let th = 4 + Math.floor(Math.random() * 2);
+                let leafRadius = 2;
+                let leafHeight = 3;
 
-            if (h >= 4 && Math.random() < 0.015) {
-                const th = 4 + Math.floor(Math.random() * 2);
+                if (treeType < 0.3) { // Tall Pine
+                    th = 6 + Math.floor(Math.random() * 3);
+                    leafRadius = 1;
+                    leafHeight = 5;
+                } else if (treeType < 0.6) { // Wide Oak
+                    th = 3 + Math.floor(Math.random() * 2);
+                    leafRadius = 3;
+                    leafHeight = 3;
+                }
+
                 for(let ty=1; ty<=th; ty++) {
                     const tyy = h + ty;
                     if (tyy < CHUNK_HEIGHT) chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + tyy] = BlockType.WOOD;
                 }
-                for(let lx=-2; lx<=2; lx++) {
-                    for(let lz=-2; lz<=2; lz++) {
-                        for(let ly=th-1; ly<=th+1; ly++) {
+                
+                for(let lx=-leafRadius; lx<=leafRadius; lx++) {
+                    for(let lz=-leafRadius; lz<=leafRadius; lz++) {
+                        for(let ly=th-Math.floor(leafHeight/2); ly<=th+Math.floor(leafHeight/2); ly++) {
                             const tyy = h + ly;
-                            if (tyy >= CHUNK_HEIGHT) continue;
+                            if (tyy >= CHUNK_HEIGHT || tyy < 0) continue;
                             const rrx = rx + lx; const rrz = rz + lz;
                             if (rrx >= 0 && rrx < CHUNK_SIZE && rrz >= 0 && rrz < CHUNK_SIZE) {
-                                if (Math.abs(lx) + Math.abs(lz) < 3 && !(lx===0 && lz===0 && ly<th+1)) {
+                                const d = Math.sqrt(lx*lx + lz*lz);
+                                if (d <= leafRadius && !(lx===0 && lz===0 && ly<=th)) {
                                     if (chunk[rrx * CHUNK_SIZE * CHUNK_HEIGHT + rrz * CHUNK_HEIGHT + tyy] === BlockType.AIR) {
                                         chunk[rrx * CHUNK_SIZE * CHUNK_HEIGHT + rrz * CHUNK_HEIGHT + tyy] = BlockType.LEAVES;
                                     }
@@ -214,6 +490,7 @@ const genChunk = (cx: number, cz: number) => {
             }
         }
     }
+    spawnEntities(cx, cz, chunk);
     meshChunk(cx, cz);
 };
 
@@ -311,24 +588,30 @@ slotsContainer.style.cssText = 'display:grid; grid-template-columns: 1fr 1fr 1fr
 homeScreen.appendChild(slotsContainer);
 
 // --- SETTINGS UI ---
-settingsScreen.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); display:none; flex-direction:column; align-items:center; justify-content:center; z-index:2000; color:white; font-family:sans-serif;';
+settingsScreen.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.9); display:none; flex-direction:column; align-items:center; z-index:2000; color:white; font-family:sans-serif; overflow-y:auto; padding:20px 0;';
 document.body.appendChild(settingsScreen);
 
+const settingsContent = document.createElement('div');
+settingsContent.style.cssText = 'width:90%; max-width:400px; display:flex; flex-direction:column; align-items:center; gap:10px; padding-bottom:40px;';
+settingsScreen.appendChild(settingsContent);
+
 const sTitle = document.createElement('h2');
-sTitle.innerText = 'SETTINGS (Press 0 to close)';
-sTitle.style.marginBottom = '30px';
-settingsScreen.appendChild(sTitle);
+sTitle.innerText = 'SETTINGS';
+sTitle.style.marginBottom = '20px';
+settingsContent.appendChild(sTitle);
 
 const createSetting = (label: string, min: number, max: number, val: number, onChange: (v: number)=>void) => {
     const row = document.createElement('div');
-    row.style.cssText = 'width:300px; display:flex; flex-direction:column; gap:10px; margin-bottom:20px;';
+    row.style.cssText = 'width:100%; display:flex; flex-direction:column; gap:5px; margin-bottom:15px;';
     const l = document.createElement('label');
     l.innerText = `${label}: ${val}`;
+    l.style.fontSize = '14px';
     const s = document.createElement('input');
     s.type = 'range'; s.min = min.toString(); s.max = max.toString(); s.value = val.toString();
+    s.style.width = '100%';
     s.oninput = () => { l.innerText = `${label}: ${s.value}`; onChange(parseInt(s.value)); };
     row.appendChild(l); row.appendChild(s);
-    settingsScreen.appendChild(row);
+    settingsContent.appendChild(row);
 };
 
 createSetting('Render Distance', 1, 6, renderDist, (v) => { renderDist = v; });
@@ -513,7 +796,11 @@ const keys: Record<string, boolean> = {};
 document.addEventListener('keydown', e => { 
     keys[e.code] = true; 
     if (e.key >= '1' && e.key <= '6') { slot = parseInt(e.key)-1; drawUI(); }
-    if (e.key === '0' || e.key === 'Escape') { toggleSettings(); }
+    if (e.key === '0' || e.key === 'Escape') { 
+        if (isInventoryOpen) toggleInventory();
+        else toggleSettings(); 
+    }
+    if (e.code === 'KeyI') { toggleInventory(); }
     
     if (e.code === 'Space' && isGameStarted && !isSettingsOpen) {
         if (!spaceTimer) {
@@ -532,7 +819,70 @@ document.addEventListener('keyup', e => {
         spaceTimer = null;
     }
 });
-document.addEventListener('mousedown', () => { if(isGameStarted && !isSettingsOpen) ctrl.lock(); });
+const addToInventory = (item: string) => {
+    const current = playerInventory.get(item) || 0;
+    playerInventory.set(item, current + 1);
+};
+
+const raycaster = new THREE.Raycaster();
+document.addEventListener('mousedown', (e) => { 
+    if(isGameStarted && !isSettingsOpen && !isInventoryOpen) {
+        if (e.button === 0) { // Left click
+            // 1. Check for entities first (food collection)
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            const allMeshes: THREE.Object3D[] = [];
+            const entMap = new Map<THREE.Object3D, {ent: Entity, chunk: string}>();
+            
+            entities.forEach((chunkEnts, key) => {
+                chunkEnts.forEach(ent => {
+                    allMeshes.push(ent.mesh);
+                    entMap.set(ent.mesh, {ent, chunk: key});
+                });
+            });
+            
+            const intersects = raycaster.intersectObjects(allMeshes, true);
+            if (intersects.length > 0) {
+                let obj = intersects[0]!.object;
+                while(obj.parent && !entMap.has(obj)) obj = obj.parent;
+                
+                const data = entMap.get(obj);
+                if (data && data.ent.type === 'food') {
+                    const dist = camera.position.distanceTo(data.ent.mesh.position);
+                    if (dist < 4) {
+                        addToInventory(data.ent.modelName);
+                        scene.remove(data.ent.mesh);
+                        const chunkEnts = entities.get(data.chunk)!;
+                        chunkEnts.splice(chunkEnts.indexOf(data.ent), 1);
+                        return;
+                    }
+                }
+            }
+
+            // 2. Check for blocks
+            const ray = new THREE.Raycaster(camera.position, camera.getWorldDirection(new THREE.Vector3()), 0, 5);
+            const worldMeshes = Array.from(chunkGroups.values()).flatMap(g => g.children);
+            const blockIntersects = ray.intersectObjects(worldMeshes);
+
+            if (blockIntersects.length > 0) {
+                const inter = blockIntersects[0]!;
+                const p = inter.point.clone().add(inter.face!.normal.clone().multiplyScalar(-0.5));
+                const bx = Math.floor(p.x), by = Math.floor(p.y), bz = Math.floor(p.z);
+                
+                breakingBlock = { x: bx, y: by, z: bz, startTime: performance.now() };
+                breakProgressCircle.style.display = 'block';
+            }
+        }
+        ctrl.lock(); 
+    }
+});
+
+document.addEventListener('mouseup', (e) => {
+    if (e.button === 0) {
+        breakingBlock = null;
+        breakProgressCircle.style.display = 'none';
+        breakProgressCircle.style.borderTopColor = '#fff';
+    }
+});
 
 // --- GAME LOOP ---
 let velY = 0, lastF = performance.now(), frames = 0;
@@ -665,6 +1015,27 @@ const ui = document.createElement('div');
 ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; z-index:100; pointer-events:auto;';
 document.body.appendChild(ui);
 
+const hungerBarContainer = document.createElement('div');
+hungerBarContainer.style.cssText = 'position:fixed; bottom:95px; left:50%; transform:translateX(-50%); width:200px; height:15px; background:rgba(0,0,0,0.5); border-radius:10px; overflow:hidden; border:2px solid rgba(255,255,255,0.2); z-index:100;';
+document.body.appendChild(hungerBarContainer);
+
+const hungerBar = document.createElement('div');
+hungerBar.style.cssText = 'width:100%; height:100%; background:#ff5722; transition: width 0.3s;';
+hungerBarContainer.appendChild(hungerBar);
+
+const hungerLabel = document.createElement('div');
+hungerLabel.style.cssText = 'position:fixed; bottom:115px; left:50%; transform:translateX(-50%); color:white; font-family:monospace; font-size:12px; font-weight:bold; z-index:100; text-shadow:1px 1px 2px black;';
+hungerLabel.innerText = 'HUNGER';
+document.body.appendChild(hungerLabel);
+
+const updateHunger = (delta: number) => {
+    hunger = Math.max(0, Math.min(100, hunger + delta));
+    hungerBar.style.width = `${hunger}%`;
+    if (hunger < 30) hungerBar.style.background = '#f44336';
+    else if (hunger < 60) hungerBar.style.background = '#ff9800';
+    else hungerBar.style.background = '#4CAF50';
+};
+
 const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
 let slot = 0;
 const drawUI = () => {
@@ -684,6 +1055,33 @@ drawUI();
 function animate() {
     requestAnimationFrame(animate);
     
+    const now = performance.now();
+
+    // 0. Block Breaking Logic
+    if (breakingBlock && !isInventoryOpen && !isSettingsOpen) {
+        const elapsed = now - breakingBlock.startTime;
+        const progress = Math.min(1, elapsed / breakDuration);
+        
+        // Update circle UI
+        breakProgressCircle.style.display = 'block';
+        breakProgressCircle.style.borderTopColor = `hsl(${progress * 120}, 100%, 50%)`;
+        breakProgressCircle.style.transform = `translate(-50%, -50%) rotate(${progress * 360}deg)`;
+        
+        if (elapsed >= breakDuration) {
+            const blockType = getBlock(breakingBlock.x, breakingBlock.y, breakingBlock.z);
+            if (blockType !== BlockType.AIR) {
+                const blockName = idToName[blockType];
+                if (blockName) {
+                    addToInventory(blockName);
+                    setBlock(breakingBlock.x, breakingBlock.y, breakingBlock.z, BlockType.AIR);
+                    console.log('Broke and picked up ' + blockName);
+                }
+            }
+            breakingBlock = null;
+            breakProgressCircle.style.display = 'none';
+        }
+    }
+
     if (isGameStarted) {
         const dayInt = Math.max(0.1, Math.sin((time / 2400) * Math.PI) * 1.2);
         scene.background = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.45);
@@ -704,7 +1102,6 @@ function animate() {
         return;
     }
 
-    const now = performance.now();
     frames++;
     if (now > lastF + 1000) { fpsDisplay.innerText = `FPS: ${frames}`; frames = 0; lastF = now; }
 
@@ -799,6 +1196,75 @@ function animate() {
                 camera.position.z = oldZ;
             }
         }
+
+        // 3. Hunger & Collection Logic
+        if (now > lastHungerUpdate + 1000) {
+            updateHunger(-hungerDecreaseRate * (isFlying ? 2 : 1));
+            lastHungerUpdate = now;
+        }
+
+        entities.forEach((chunkEntities, chunkKey) => {
+            for (let i = chunkEntities.length - 1; i >= 0; i--) {
+                const ent = chunkEntities[i]!;
+                
+                if (ent.type === 'character') {
+                    // 1. Character Gravity
+                    ent.velY -= 0.01;
+                    const nextY = ent.mesh.position.y + ent.velY;
+                    const blockBelow = getBlock(ent.mesh.position.x, nextY, ent.mesh.position.z);
+                    
+                    if (blockBelow !== BlockType.AIR && blockBelow !== BlockType.WATER) {
+                        ent.mesh.position.y = Math.floor(nextY) + 1;
+                        ent.velY = 0;
+                        ent.onGround = true;
+                    } else {
+                        ent.mesh.position.y = nextY;
+                        ent.onGround = false;
+                    }
+
+                    // 2. Job-Specific AI
+                    if (ent.onGround) {
+                        if (!ent.targetPos || (ent.moveTimer && now > ent.moveTimer)) {
+                            const angle = Math.random() * Math.PI * 2;
+                            let dist = 2 + Math.random() * 4;
+                            
+                            // Adjust behavior based on job
+                            if (ent.job === 'mining') dist = 1; // Stay near current spot
+                            else if (ent.job === 'idle') dist = 0.5;
+
+                            ent.targetPos = new THREE.Vector3(
+                                ent.mesh.position.x + Math.cos(angle) * dist,
+                                ent.mesh.position.y,
+                                ent.mesh.position.z + Math.sin(angle) * dist
+                            );
+                            ent.moveTimer = now + 3000 + Math.random() * 5000;
+                        }
+
+                        const distToTarget = ent.mesh.position.distanceTo(ent.targetPos);
+                        if (distToTarget > 0.2) {
+                            const dir = ent.targetPos.clone().sub(ent.mesh.position).normalize();
+                            ent.mesh.position.add(dir.multiplyScalar(0.02));
+                            ent.mesh.lookAt(ent.targetPos.x, ent.mesh.position.y, ent.targetPos.z);
+                            
+                            // Visual indication of job
+                            if (ent.job === 'farming' && Math.random() < 0.01) {
+                                // Simulate "planting" by checking if block is grass and changing color slightly
+                                const bx = Math.floor(ent.mesh.position.x), by = Math.floor(ent.mesh.position.y)-1, bz = Math.floor(ent.mesh.position.z);
+                                if (getBlock(bx, by, bz) === BlockType.GRASS && Math.random() < 0.1) {
+                                    // Could spawn a tiny plant mesh here
+                                }
+                            }
+                        } else {
+                            // Look at player if idle and close
+                            const distToPlayer = camera.position.distanceTo(ent.mesh.position);
+                            if (distToPlayer < 8) {
+                                ent.mesh.lookAt(camera.position.x, ent.mesh.position.y, camera.position.z);
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
     renderer.render(scene, camera);
 }
