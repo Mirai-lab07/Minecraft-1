@@ -28,7 +28,15 @@ const idToName = {
     [BlockType.SAND]: 'sand',
     [BlockType.WATER]: 'water'
 };
-const nameToId = Object.fromEntries(Object.entries(idToName).map(([id, name]) => [name, parseInt(id)]));
+const mats = {}; // Initialized later
+// --- GLOBAL STATE ---
+let isGameStarted = false;
+const world = new Map();
+const chunkGroups = new Map();
+const box = new THREE.BoxGeometry(1, 1, 1);
+const noise = new PerlinNoise();
+const tempMatrix = new THREE.Matrix4();
+const homeScreen = document.createElement('div');
 // --- 12H TIME SYSTEM ---
 const getTimeStr = () => {
     let h = Math.floor(time / 100);
@@ -50,13 +58,6 @@ scene.add(ambient);
 const sun = new THREE.DirectionalLight(0xffffff, 0.6);
 sun.position.set(10, 50, 10);
 scene.add(sun);
-// --- UI ELEMENTS ---
-const fpsDisplay = document.createElement('div');
-fpsDisplay.style.cssText = 'position:fixed; top:15px; left:15px; color:lime; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.4); padding:4px 8px; border-radius:4px; pointer-events:none; z-index:20;';
-document.body.appendChild(fpsDisplay);
-const clock = document.createElement('div');
-clock.style.cssText = 'position:fixed; top:15px; right:15px; color:white; font-family:monospace; font-size:22px; font-weight:bold; text-shadow:2px 2px 4px rgba(0,0,0,0.5); pointer-events:none; z-index:20;';
-document.body.appendChild(clock);
 // --- MATERIALS & TEXTURE ---
 const tex = (() => {
     const c = document.createElement('canvas');
@@ -73,21 +74,14 @@ const tex = (() => {
     t.magFilter = t.minFilter = THREE.NearestFilter;
     return t;
 })();
-const mats = {
-    grass: new THREE.MeshLambertMaterial({ map: tex, color: 0x567d46 }),
-    dirt: new THREE.MeshLambertMaterial({ map: tex, color: 0x5d4037 }),
-    stone: new THREE.MeshLambertMaterial({ map: tex, color: 0x757575 }),
-    wood: new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 }),
-    leaves: new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent: true, opacity: 0.8 }),
-    sand: new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d }),
-    water: new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent: true, opacity: 0.6 })
-};
-// --- WORLD DATA ---
-const world = new Map();
-const chunkGroups = new Map();
-const box = new THREE.BoxGeometry(1, 1, 1);
-const noise = new PerlinNoise();
-const tempMatrix = new THREE.Matrix4();
+mats['grass'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x567d46 });
+mats['dirt'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x5d4037 });
+mats['stone'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x757575 });
+mats['wood'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 });
+mats['leaves'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent: true, opacity: 0.8 });
+mats['sand'] = new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d });
+mats['water'] = new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent: true, opacity: 0.6 });
+// --- WORLD LOGIC ---
 const getChunkCoord = (x, z) => {
     return {
         cx: Math.floor(x / CHUNK_SIZE),
@@ -104,19 +98,6 @@ const getBlock = (x, y, z) => {
     if (!chunk)
         return BlockType.AIR;
     return chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] || BlockType.AIR;
-};
-const setBlock = (x, y, z, type) => {
-    if (y < 0 || y >= CHUNK_HEIGHT)
-        return;
-    const { cx, cz, rx, rz } = getChunkCoord(x, z);
-    const key = `${cx},${cz}`;
-    let chunk = world.get(key);
-    if (!chunk) {
-        chunk = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
-        world.set(key, chunk);
-    }
-    chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = type;
-    meshChunk(cx, cz);
 };
 const meshChunk = (cx, cz) => {
     const key = `${cx},${cz}`;
@@ -136,9 +117,8 @@ const meshChunk = (cx, cz) => {
     const typeCounts = {};
     for (let i = 0; i < chunk.length; i++) {
         const type = chunk[i];
-        if (type !== BlockType.AIR) {
+        if (type !== BlockType.AIR)
             typeCounts[type] = (typeCounts[type] || 0) + 1;
-        }
     }
     for (const [typeStr, count] of Object.entries(typeCounts)) {
         const type = parseInt(typeStr);
@@ -183,7 +163,6 @@ const genChunk = (cx, cz) => {
                     chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = BlockType.WATER;
                 }
             }
-            // Simple Tree Gen (probabilistic)
             if (h >= 4 && Math.random() < 0.015) {
                 const th = 4 + Math.floor(Math.random() * 2);
                 for (let ty = 1; ty <= th; ty++) {
@@ -191,7 +170,6 @@ const genChunk = (cx, cz) => {
                     if (tyy < CHUNK_HEIGHT)
                         chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + tyy] = BlockType.WOOD;
                 }
-                // Leaves (simplified for now to stay within chunk boundaries easily)
                 for (let lx = -2; lx <= 2; lx++) {
                     for (let lz = -2; lz <= 2; lz++) {
                         for (let ly = th - 1; ly <= th + 1; ly++) {
@@ -215,127 +193,135 @@ const genChunk = (cx, cz) => {
     }
     meshChunk(cx, cz);
 };
-// --- UI & INVENTORY ---
-const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
-let slot = 0;
-const ui = document.createElement('div');
-ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; backdrop-filter:blur(10px); z-index:10;';
-document.body.appendChild(ui);
-const drawUI = () => {
-    ui.innerHTML = inv.map((item, i) => {
-        const material = mats[item];
-        const color = material ? `#${material.color.getHexString()}` : '#fff';
-        return `
-        <div style="width:50px; height:50px; background:${i === slot ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.2)'}; border:2px solid ${i === slot ? '#fff' : 'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
-            <div style="width:22px; height:22px; background:${color}; border-radius:4px;"></div>
-            <span style="font-size:10px; color:white; font-weight:bold; margin-top:2px;">${i + 1}</span>
-        </div>`;
-    }).join('');
+// --- HOME SCREEN UI ---
+homeScreen.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url("https://wallpaperaccess.com/full/466645.jpg"); background-size:cover; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:1000; color:white; font-family:sans-serif; transition: opacity 0.5s ease-out;';
+document.body.appendChild(homeScreen);
+const title = document.createElement('h1');
+title.innerText = 'MINECRAFT WEB';
+title.style.cssText = 'font-size:60px; margin-bottom:40px; letter-spacing:10px; text-shadow:4px 4px 0px #333;';
+homeScreen.appendChild(title);
+const playBtn = document.createElement('button');
+playBtn.innerText = 'PLAY GAME';
+playBtn.style.cssText = 'padding:15px 60px; font-size:20px; background:#4CAF50; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold; margin-bottom:30px; transition: 0.2s; box-shadow: 0 4px #2e7d32;';
+homeScreen.appendChild(playBtn);
+const slotsContainer = document.createElement('div');
+slotsContainer.style.cssText = 'display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px; width:80%; max-width:600px;';
+homeScreen.appendChild(slotsContainer);
+const updateSlots = () => {
+    slotsContainer.innerHTML = '';
+    for (let i = 1; i <= 3; i++) {
+        const slotData = localStorage.getItem('mc_save_' + i);
+        const slot = document.createElement('div');
+        slot.style.cssText = 'background:rgba(255,255,255,0.1); padding:20px; border-radius:10px; border:2px solid rgba(255,255,255,0.2); text-align:center; display:flex; flex-direction:column; gap:10px; backdrop-filter: blur(5px);';
+        const slotTitle = document.createElement('div');
+        slotTitle.innerText = 'SLOT ' + i;
+        slotTitle.style.fontWeight = 'bold';
+        slot.appendChild(slotTitle);
+        const slotStatus = document.createElement('div');
+        slotStatus.innerText = slotData ? 'SAVED GAME' : 'EMPTY';
+        slotStatus.style.fontSize = '12px';
+        slotStatus.style.color = slotData ? '#4CAF50' : '#888';
+        slot.appendChild(slotStatus);
+        if (slotData) {
+            const loadBtn = document.createElement('button');
+            loadBtn.innerText = 'LOAD';
+            loadBtn.style.cssText = 'padding:8px; background:#2196F3; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;';
+            loadBtn.onclick = (e) => { e.stopPropagation(); loadGame(i); };
+            slot.appendChild(loadBtn);
+        }
+        const saveBtn = document.createElement('button');
+        saveBtn.innerText = slotData ? 'OVERWRITE' : 'SAVE HERE';
+        saveBtn.style.cssText = `padding:8px; background:${slotData ? '#f44336' : '#666'}; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;`;
+        saveBtn.onclick = (e) => { e.stopPropagation(); saveGame(i); };
+        slot.appendChild(saveBtn);
+        slotsContainer.appendChild(slot);
+    }
 };
-drawUI();
-// --- SETTINGS MENU ---
-const settingsMenu = document.createElement('div');
-settingsMenu.id = 'game-settings';
-settingsMenu.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); padding:25px; background:rgba(15,15,15,0.95); border-radius:20px; color:white; display:none; width:300px; font-family:sans-serif; text-align:center; z-index:100; border:1px solid rgba(255,255,255,0.1);';
-settingsMenu.innerHTML = `
-    <h3 style="margin-top:0; letter-spacing:2px;">GAME SETTINGS</h3>
-    <div style="margin-bottom:15px; text-align:left;">
-        <div style="font-size:10px; opacity:0.5; margin-bottom:5px;">RENDER DISTANCE: <span id="rd-val">2</span></div>
-        <input type="range" id="rd-range" style="width:100%" min="1" max="4" value="2">
-    </div>
-    <button id="tex-btn" style="width:100%; padding:10px; margin-bottom:10px; border-radius:8px; border:none; background:#444; color:white; font-weight:bold; cursor:pointer;">TEXTURES: ON</button>
-    <button id="dev-btn" style="width:100%; padding:10px; margin-bottom:10px; border-radius:8px; border:none; background:#444; color:white; font-weight:bold; cursor:pointer;">DEV MODE: OFF</button>
-    <div id="dev-opts" style="display:none; margin-bottom:15px; background:rgba(255,255,255,0.05); padding:10px; border-radius:10px;">
-        <div style="font-size:10px; opacity:0.5; margin-bottom:5px;">TIME CONTROL</div>
-        <input type="range" id="t-range" style="width:100%" min="0" max="2400" value="1000">
-    </div>
-    <button id="resume-btn" style="width:100%; padding:12px; background:#4CAF50; border:none; color:white; border-radius:8px; cursor:pointer; font-weight:bold;">RESUME GAME</button>
-`;
-document.body.appendChild(settingsMenu);
-// --- CONTROLS & EVENTS ---
+const saveGame = (s) => {
+    const worldData = {};
+    world.forEach((val, key) => {
+        worldData[key] = btoa(String.fromCharCode(...val));
+    });
+    const data = { p: camera.position.toArray(), w: worldData, t: time };
+    localStorage.setItem('mc_save_' + s, JSON.stringify(data));
+    updateSlots();
+    alert('Game Saved to Slot ' + s);
+};
+const loadGame = (s) => {
+    const raw = localStorage.getItem('mc_save_' + s);
+    if (!raw)
+        return;
+    const d = JSON.parse(raw);
+    world.clear();
+    chunkGroups.forEach(g => scene.remove(g));
+    chunkGroups.clear();
+    for (const key in d.w) {
+        const binStr = atob(d.w[key]);
+        const arr = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i++)
+            arr[i] = binStr.charCodeAt(i);
+        world.set(key, arr);
+        const [cx, cz] = key.split(',').map(Number);
+        meshChunk(cx, cz);
+    }
+    camera.position.fromArray(d.p);
+    time = d.t;
+    startGame();
+};
+const startGame = () => {
+    isGameStarted = true;
+    homeScreen.style.opacity = '0';
+    homeScreen.style.pointerEvents = 'none';
+    setTimeout(() => { homeScreen.style.display = 'none'; }, 500);
+    ctrl.lock();
+    renderer.render(scene, camera);
+};
+playBtn.onclick = startGame;
+updateSlots();
+// --- CONTROLS ---
 const ctrl = new PointerLockControls(camera, document.body);
 const keys = {};
-const toggleSettings = () => {
-    const isVisible = settingsMenu.style.display === 'block';
-    settingsMenu.style.display = isVisible ? 'none' : 'block';
-    if (!isVisible)
-        ctrl.unlock();
-    else
-        ctrl.lock();
-};
 document.addEventListener('keydown', e => {
     keys[e.code] = true;
-    if (e.key === '0')
-        toggleSettings();
     if (e.key >= '1' && e.key <= '6') {
         slot = parseInt(e.key) - 1;
         drawUI();
     }
 });
 document.addEventListener('keyup', e => keys[e.code] = false);
-document.addEventListener('mousedown', (e) => {
-    if (settingsMenu.style.display !== 'block') {
-        ctrl.lock();
-        if (ctrl.isLocked) {
-            // Basic block break/place logic can be added here
-            // For now just locking the pointer
-        }
-    }
-});
-// Event Listeners
-document.getElementById('resume-btn')?.addEventListener('click', toggleSettings);
-document.getElementById('rd-range')?.addEventListener('input', (e) => {
-    const target = e.target;
-    if (target) {
-        renderDist = parseInt(target.value);
-        const val = document.getElementById('rd-val');
-        if (val)
-            val.innerText = target.value;
-    }
-});
-document.getElementById('tex-btn')?.addEventListener('click', () => {
-    useTextures = !useTextures;
-    const btn = document.getElementById('tex-btn');
-    if (btn)
-        btn.innerText = `TEXTURES: ${useTextures ? 'ON' : 'OFF'}`;
-    for (const m in mats) {
-        if (mats[m]) {
-            mats[m].map = useTextures ? tex : null;
-            mats[m].needsUpdate = true;
-        }
-    }
-});
-document.getElementById('dev-btn')?.addEventListener('click', () => {
-    isDev = !isDev;
-    const btn = document.getElementById('dev-btn');
-    if (btn) {
-        btn.innerText = `DEV MODE: ${isDev ? 'ON' : 'OFF'}`;
-        btn.style.background = isDev ? '#4CAF50' : '#444';
-    }
-    const opts = document.getElementById('dev-opts');
-    if (opts)
-        opts.style.display = isDev ? 'block' : 'none';
-});
-document.getElementById('t-range')?.addEventListener('input', (e) => {
-    const target = e.target;
-    if (target)
-        time = parseInt(target.value);
-});
-// --- GAME LOOP & PHYSICS ---
+document.addEventListener('mousedown', () => { if (isGameStarted)
+    ctrl.lock(); });
+// --- GAME LOOP ---
 let velY = 0, lastF = performance.now(), frames = 0;
 camera.position.set(0, 15, 0);
+// Initial chunks
+for (let x = -renderDist; x <= renderDist; x++) {
+    for (let z = -renderDist; z <= renderDist; z++) {
+        genChunk(x, z);
+    }
+}
+const clockDisplay = document.createElement('div');
+clockDisplay.style.cssText = 'position:fixed; top:15px; right:15px; color:white; font-family:monospace; font-size:22px; font-weight:bold; z-index:20;';
+document.body.appendChild(clockDisplay);
+const fpsDisplay = document.createElement('div');
+fpsDisplay.style.cssText = 'position:fixed; top:15px; left:15px; color:lime; font-family:monospace; font-size:12px; z-index:20;';
+document.body.appendChild(fpsDisplay);
+const ui = document.createElement('div');
+ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; z-index:10;';
+document.body.appendChild(ui);
+const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
+let slot = 0;
+const drawUI = () => {
+    ui.innerHTML = inv.map((item, i) => `
+        <div style="width:50px; height:50px; background:${i === slot ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.2)'}; border:2px solid ${i === slot ? '#fff' : 'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+            <div style="width:22px; height:22px; background:#${mats[item].color.getHexString()}; border-radius:4px;"></div>
+            <span style="font-size:10px; color:white;">${i + 1}</span>
+        </div>`).join('');
+};
+drawUI();
 function animate() {
     requestAnimationFrame(animate);
-    const now = performance.now();
-    frames++;
-    if (now > lastF + 1000) {
-        fpsDisplay.innerText = `FPS: ${frames}`;
-        frames = 0;
-        lastF = now;
-    }
-    if (ctrl.isLocked) {
-        time = (time + 0.003) % 2400;
-        clock.innerText = getTimeStr();
+    if (isGameStarted) {
         const dayInt = Math.max(0.1, Math.sin((time / 2400) * Math.PI) * 1.2);
         scene.background = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.45);
         ambient.intensity = dayInt * 0.7;
@@ -347,17 +333,27 @@ function animate() {
                 genChunk(cx + x, cz + z);
             }
         }
-        // Improved Physics
+    }
+    if (!isGameStarted) {
+        renderer.render(scene, camera);
+        return;
+    }
+    const now = performance.now();
+    frames++;
+    if (now > lastF + 1000) {
+        fpsDisplay.innerText = `FPS: ${frames}`;
+        frames = 0;
+        lastF = now;
+    }
+    if (ctrl.isLocked) {
+        time = (time + 0.003) % 2400;
+        clockDisplay.innerText = getTimeStr();
         velY -= 0.008;
         camera.position.y += velY;
         const px = camera.position.x;
         const py = camera.position.y;
         const pz = camera.position.z;
-        // Bounding box check (simplified)
-        const checkPoints = [
-            [px - 0.3, py - 1.7, pz - 0.3], [px + 0.3, py - 1.7, pz - 0.3],
-            [px - 0.3, py - 1.7, pz + 0.3], [px + 0.3, py - 1.7, pz + 0.3]
-        ];
+        const checkPoints = [[px - 0.3, py - 1.7, pz - 0.3], [px + 0.3, py - 1.7, pz - 0.3], [px - 0.3, py - 1.7, pz + 0.3], [px + 0.3, py - 1.7, pz + 0.3]];
         let onGround = false;
         for (const p of checkPoints) {
             const b = getBlock(Math.round(p[0]), Math.floor(p[1]), Math.round(p[2]));

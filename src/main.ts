@@ -3,12 +3,25 @@ import { PointerLockControls } from 'three/examples/jsm/controls/PointerLockCont
 import { PerlinNoise } from './noise.js';
 
 // --- CONFIG ---
-const CHUNK_SIZE = 14;
-const CHUNK_HEIGHT = 32;
+let CHUNK_SIZE = 14;
+let CHUNK_HEIGHT = 32;
 let renderDist = 2;
 let useTextures = true;
 let isDev = false;
 let time = 1000; 
+
+const resetWorld = () => {
+    world.clear();
+    chunkGroups.forEach(g => scene.remove(g));
+    chunkGroups.clear();
+    const cx = Math.floor(camera.position.x / CHUNK_SIZE);
+    const cz = Math.floor(camera.position.z / CHUNK_SIZE);
+    for(let x=-renderDist; x<=renderDist; x++) {
+        for(let z=-renderDist; z<=renderDist; z++) {
+            genChunk(cx+x, cz+z);
+        }
+    }
+};
 
 enum BlockType {
     AIR = 0,
@@ -31,9 +44,20 @@ const idToName: Record<number, string> = {
     [BlockType.WATER]: 'water'
 };
 
-const nameToId: Record<string, number> = Object.fromEntries(
-    Object.entries(idToName).map(([id, name]) => [name, parseInt(id)])
-);
+const mats: Record<string, THREE.MeshLambertMaterial> = {}; // Initialized later
+
+// --- GLOBAL STATE ---
+let isGameStarted = false;
+let isSettingsOpen = false;
+let isFlying = false;
+let spaceTimer: any = null;
+const world = new Map<string, Uint8Array>();
+const chunkGroups = new Map<string, THREE.Group>();
+const box = new THREE.BoxGeometry(1, 1, 1);
+const noise = new PerlinNoise();
+const tempMatrix = new THREE.Matrix4();
+const homeScreen = document.createElement('div');
+const settingsScreen = document.createElement('div');
 
 // --- 12H TIME SYSTEM ---
 const getTimeStr = () => {
@@ -58,15 +82,6 @@ const sun = new THREE.DirectionalLight(0xffffff, 0.6);
 sun.position.set(10, 50, 10);
 scene.add(sun);
 
-// --- UI ELEMENTS ---
-const fpsDisplay = document.createElement('div');
-fpsDisplay.style.cssText = 'position:fixed; top:15px; left:15px; color:lime; font-family:monospace; font-size:12px; background:rgba(0,0,0,0.4); padding:4px 8px; border-radius:4px; pointer-events:none; z-index:20;';
-document.body.appendChild(fpsDisplay);
-
-const clock = document.createElement('div');
-clock.style.cssText = 'position:fixed; top:15px; right:15px; color:white; font-family:monospace; font-size:22px; font-weight:bold; text-shadow:2px 2px 4px rgba(0,0,0,0.5); pointer-events:none; z-index:20;';
-document.body.appendChild(clock);
-
 // --- MATERIALS & TEXTURE ---
 const tex = (() => {
     const c = document.createElement('canvas'); c.width = 16; c.height = 16;
@@ -75,51 +90,33 @@ const tex = (() => {
     const t = new THREE.CanvasTexture(c); t.magFilter = t.minFilter = THREE.NearestFilter; return t;
 })();
 
-const mats: Record<string, THREE.MeshLambertMaterial> = {
-    grass: new THREE.MeshLambertMaterial({ map: tex, color: 0x567d46 }),
-    dirt: new THREE.MeshLambertMaterial({ map: tex, color: 0x5d4037 }),
-    stone: new THREE.MeshLambertMaterial({ map: tex, color: 0x757575 }),
-    wood: new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 }),
-    leaves: new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent:true, opacity:0.8 }),
-    sand: new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d }),
-    water: new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent:true, opacity:0.6 })
-};
+mats['grass'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x567d46 });
+mats['dirt'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x5d4037 });
+mats['stone'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x757575 });
+mats['wood'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 });
+mats['leaves'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent:true, opacity:0.8 });
+mats['sand'] = new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d });
+mats['water'] = new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent:true, opacity:0.6 });
 
-// --- WORLD DATA ---
-const world = new Map<string, Uint8Array>();
-const chunkGroups = new Map<string, THREE.Group>();
-const box = new THREE.BoxGeometry(1, 1, 1);
-const noise = new PerlinNoise();
-const tempMatrix = new THREE.Matrix4();
-
+// --- WORLD LOGIC ---
 const getChunkCoord = (x: number, z: number) => {
+    const ix = Math.floor(x);
+    const iz = Math.floor(z);
     return {
-        cx: Math.floor(x / CHUNK_SIZE),
-        cz: Math.floor(z / CHUNK_SIZE),
-        rx: ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE,
-        rz: ((z % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE
+        cx: Math.floor(ix / CHUNK_SIZE),
+        cz: Math.floor(iz / CHUNK_SIZE),
+        rx: ((ix % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE,
+        rz: ((iz % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE
     };
 };
 
 const getBlock = (x: number, y: number, z: number): number => {
-    if (y < 0 || y >= CHUNK_HEIGHT) return BlockType.AIR;
+    const iy = Math.floor(y);
+    if (iy < 0 || iy >= CHUNK_HEIGHT) return BlockType.AIR;
     const { cx, cz, rx, rz } = getChunkCoord(x, z);
     const chunk = world.get(`${cx},${cz}`);
     if (!chunk) return BlockType.AIR;
-    return chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] || BlockType.AIR;
-};
-
-const setBlock = (x: number, y: number, z: number, type: number) => {
-    if (y < 0 || y >= CHUNK_HEIGHT) return;
-    const { cx, cz, rx, rz } = getChunkCoord(x, z);
-    const key = `${cx},${cz}`;
-    let chunk = world.get(key);
-    if (!chunk) {
-        chunk = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
-        world.set(key, chunk);
-    }
-    chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = type;
-    meshChunk(cx, cz);
+    return chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + iy] || BlockType.AIR;
 };
 
 const meshChunk = (cx: number, cz: number) => {
@@ -128,9 +125,8 @@ const meshChunk = (cx: number, cz: number) => {
     if (!chunk) return;
 
     let group = chunkGroups.get(key);
-    if (group) {
-        group.clear();
-    } else {
+    if (group) { group.clear(); } 
+    else {
         group = new THREE.Group();
         group.position.set(cx * CHUNK_SIZE, 0, cz * CHUNK_SIZE);
         scene.add(group);
@@ -140,9 +136,7 @@ const meshChunk = (cx: number, cz: number) => {
     const typeCounts: Record<number, number> = {};
     for (let i = 0; i < chunk.length; i++) {
         const type = chunk[i]!;
-        if (type !== BlockType.AIR) {
-            typeCounts[type] = (typeCounts[type] || 0) + 1;
-        }
+        if (type !== BlockType.AIR) typeCounts[type] = (typeCounts[type] || 0) + 1;
     }
 
     for (const [typeStr, count] of Object.entries(typeCounts)) {
@@ -190,21 +184,18 @@ const genChunk = (cx: number, cz: number) => {
                 }
             }
 
-            // Simple Tree Gen (probabilistic)
             if (h >= 4 && Math.random() < 0.015) {
                 const th = 4 + Math.floor(Math.random() * 2);
                 for(let ty=1; ty<=th; ty++) {
                     const tyy = h + ty;
                     if (tyy < CHUNK_HEIGHT) chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + tyy] = BlockType.WOOD;
                 }
-                // Leaves (simplified for now to stay within chunk boundaries easily)
                 for(let lx=-2; lx<=2; lx++) {
                     for(let lz=-2; lz<=2; lz++) {
                         for(let ly=th-1; ly<=th+1; ly++) {
                             const tyy = h + ly;
                             if (tyy >= CHUNK_HEIGHT) continue;
-                            const rrx = rx + lx;
-                            const rrz = rz + lz;
+                            const rrx = rx + lx; const rrz = rz + lz;
                             if (rrx >= 0 && rrx < CHUNK_SIZE && rrz >= 0 && rrz < CHUNK_SIZE) {
                                 if (Math.abs(lx) + Math.abs(lz) < 3 && !(lx===0 && lz===0 && ly<th+1)) {
                                     if (chunk[rrx * CHUNK_SIZE * CHUNK_HEIGHT + rrz * CHUNK_HEIGHT + tyy] === BlockType.AIR) {
@@ -221,116 +212,331 @@ const genChunk = (cx: number, cz: number) => {
     meshChunk(cx, cz);
 };
 
-// --- UI & INVENTORY ---
-const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
-let slot = 0;
-const ui = document.createElement('div');
-ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; backdrop-filter:blur(10px); z-index:10;';
-document.body.appendChild(ui);
-
-const drawUI = () => {
-    ui.innerHTML = inv.map((item, i) => {
-        const material = mats[item as string];
-        const color = material ? `#${material.color.getHexString()}` : '#fff';
-        return `
-        <div style="width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
-            <div style="width:22px; height:22px; background:${color}; border-radius:4px;"></div>
-            <span style="font-size:10px; color:white; font-weight:bold; margin-top:2px;">${i+1}</span>
-        </div>`;
-    }).join('');
+const setBlock = (x: number, y: number, z: number, type: number) => {
+    const { cx, cz, rx, rz } = getChunkCoord(x, z);
+    const key = `${cx},${cz}`;
+    let chunk = world.get(key);
+    if (!chunk) {
+        chunk = new Uint8Array(CHUNK_SIZE * CHUNK_SIZE * CHUNK_HEIGHT);
+        world.set(key, chunk);
+    }
+    chunk[rx * CHUNK_SIZE * CHUNK_HEIGHT + rz * CHUNK_HEIGHT + y] = type;
+    meshChunk(cx, cz);
 };
-drawUI();
 
-// --- SETTINGS MENU ---
-const settingsMenu = document.createElement('div');
-settingsMenu.id = 'game-settings';
-settingsMenu.style.cssText = 'position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); padding:25px; background:rgba(15,15,15,0.95); border-radius:20px; color:white; display:none; width:300px; font-family:sans-serif; text-align:center; z-index:100; border:1px solid rgba(255,255,255,0.1);';
-settingsMenu.innerHTML = `
-    <h3 style="margin-top:0; letter-spacing:2px;">GAME SETTINGS</h3>
-    <div style="margin-bottom:15px; text-align:left;">
-        <div style="font-size:10px; opacity:0.5; margin-bottom:5px;">RENDER DISTANCE: <span id="rd-val">2</span></div>
-        <input type="range" id="rd-range" style="width:100%" min="1" max="4" value="2">
-    </div>
-    <button id="tex-btn" style="width:100%; padding:10px; margin-bottom:10px; border-radius:8px; border:none; background:#444; color:white; font-weight:bold; cursor:pointer;">TEXTURES: ON</button>
-    <button id="dev-btn" style="width:100%; padding:10px; margin-bottom:10px; border-radius:8px; border:none; background:#444; color:white; font-weight:bold; cursor:pointer;">DEV MODE: OFF</button>
-    <div id="dev-opts" style="display:none; margin-bottom:15px; background:rgba(255,255,255,0.05); padding:10px; border-radius:10px;">
-        <div style="font-size:10px; opacity:0.5; margin-bottom:5px;">TIME CONTROL</div>
-        <input type="range" id="t-range" style="width:100%" min="0" max="2400" value="1000">
-    </div>
-    <button id="resume-btn" style="width:100%; padding:12px; background:#4CAF50; border:none; color:white; border-radius:8px; cursor:pointer; font-weight:bold;">RESUME GAME</button>
-`;
-document.body.appendChild(settingsMenu);
+const generateHouse = (x: number, y: number, z: number, style: number = 1) => {
+    const px = Math.round(x);
+    const py = Math.round(y);
+    const pz = Math.round(z);
 
-// --- CONTROLS & EVENTS ---
+    if (style === 1) { // Small Hut
+        for (let dx = -2; dx <= 2; dx++) {
+            for (let dz = -2; dz <= 2; dz++) {
+                for (let dy = -1; dy < 4; dy++) {
+                    const bx = px + dx; const by = py + dy; const bz = pz + dz;
+                    if (by < 0 || by >= CHUNK_HEIGHT) continue;
+                    
+                    if (dy === -1) setBlock(bx, by, bz, BlockType.WOOD); // Floor
+                    else if (dy === 3) { // Roof
+                        if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) setBlock(bx, by, bz, BlockType.WOOD);
+                    }
+                    else if (dx === -2 || dx === 2 || dz === -2 || dz === 2) {
+                        if (!(dx === 0 && dz === -2 && (dy === 0 || dy === 1))) {
+                            setBlock(bx, by, bz, BlockType.STONE);
+                        }
+                    }
+                }
+            }
+        }
+    } else if (style === 2) { // Tower
+        for (let dy = -1; dy < 8; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                for (let dz = -2; dz <= 2; dz++) {
+                    const bx = px + dx; const by = py + dy; const bz = pz + dz;
+                    if (by < 0 || by >= CHUNK_HEIGHT) continue;
+                    const dist = Math.abs(dx) + Math.abs(dz);
+                    if (dist <= 2 && dist > 1) setBlock(bx, by, bz, BlockType.STONE);
+                    if (dy === -1 || dy === 3 || dy === 7) {
+                        if (dist <= 1) setBlock(bx, by, bz, BlockType.WOOD);
+                    }
+                }
+            }
+        }
+    } else { // Garden House
+        for (let dx = -3; dx <= 3; dx++) {
+            for (let dz = -3; dz <= 3; dz++) {
+                const bx = px + dx; const by = py - 1; const bz = pz + dz;
+                setBlock(bx, by, bz, BlockType.GRASS);
+                if (Math.abs(dx) === 3 || Math.abs(dz) === 3) {
+                    setBlock(bx, py, bz, BlockType.LEAVES);
+                }
+            }
+        }
+        setBlock(px, py, pz, BlockType.WOOD);
+        setBlock(px, py+1, pz, BlockType.WOOD);
+        setBlock(px, py+2, pz, BlockType.LEAVES);
+    }
+};
+
+// --- HOME SCREEN UI ---
+homeScreen.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:linear-gradient(rgba(0,0,0,0.7), rgba(0,0,0,0.7)), url("https://wallpaperaccess.com/full/466645.jpg"); background-size:cover; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:1000; color:white; font-family:sans-serif; transition: opacity 0.5s ease-out;';
+document.body.appendChild(homeScreen);
+
+const title = document.createElement('h1');
+title.innerText = 'MINECRAFT WEB';
+title.style.cssText = 'font-size:60px; margin-bottom:40px; letter-spacing:10px; text-shadow:4px 4px 0px #333;';
+homeScreen.appendChild(title);
+
+const btnRow = document.createElement('div');
+btnRow.style.cssText = 'display:flex; gap:20px; margin-bottom:30px;';
+homeScreen.appendChild(btnRow);
+
+const playBtn = document.createElement('button');
+playBtn.innerText = 'PLAY GAME';
+playBtn.style.cssText = 'padding:15px 60px; font-size:20px; background:#4CAF50; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold; transition: 0.2s; box-shadow: 0 4px #2e7d32;';
+btnRow.appendChild(playBtn);
+
+const settingsBtn = document.createElement('button');
+settingsBtn.innerText = 'SETTINGS';
+settingsBtn.style.cssText = 'padding:15px 40px; font-size:20px; background:#666; color:white; border:none; border-radius:5px; cursor:pointer; font-weight:bold; transition: 0.2s; box-shadow: 0 4px #444;';
+btnRow.appendChild(settingsBtn);
+
+const slotsContainer = document.createElement('div');
+slotsContainer.style.cssText = 'display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px; width:80%; max-width:600px;';
+homeScreen.appendChild(slotsContainer);
+
+// --- SETTINGS UI ---
+settingsScreen.style.cssText = 'position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); display:none; flex-direction:column; align-items:center; justify-content:center; z-index:2000; color:white; font-family:sans-serif;';
+document.body.appendChild(settingsScreen);
+
+const sTitle = document.createElement('h2');
+sTitle.innerText = 'SETTINGS (Press 0 to close)';
+sTitle.style.marginBottom = '30px';
+settingsScreen.appendChild(sTitle);
+
+const createSetting = (label: string, min: number, max: number, val: number, onChange: (v: number)=>void) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'width:300px; display:flex; flex-direction:column; gap:10px; margin-bottom:20px;';
+    const l = document.createElement('label');
+    l.innerText = `${label}: ${val}`;
+    const s = document.createElement('input');
+    s.type = 'range'; s.min = min.toString(); s.max = max.toString(); s.value = val.toString();
+    s.oninput = () => { l.innerText = `${label}: ${s.value}`; onChange(parseInt(s.value)); };
+    row.appendChild(l); row.appendChild(s);
+    settingsScreen.appendChild(row);
+};
+
+createSetting('Render Distance', 1, 6, renderDist, (v) => { renderDist = v; });
+createSetting('FOV', 60, 110, camera.fov, (v) => { camera.fov = v; camera.updateProjectionMatrix(); });
+createSetting('Quality', 1, 2, renderer.getPixelRatio(), (v) => { renderer.setPixelRatio(v); });
+createSetting('Brightness', 0, 100, 60, (v) => { ambient.intensity = (v / 100); });
+createSetting('Chunk Width', 8, 24, CHUNK_SIZE, (v) => { CHUNK_SIZE = v; resetWorld(); });
+createSetting('Chunk Height', 16, 64, CHUNK_HEIGHT, (v) => { CHUNK_HEIGHT = v; resetWorld(); });
+
+const houseTitle = document.createElement('h3');
+houseTitle.innerText = 'AUTO GENERATE HOUSE';
+houseTitle.style.marginTop = '20px';
+settingsScreen.appendChild(houseTitle);
+
+const houseRow = document.createElement('div');
+houseRow.style.cssText = 'display:flex; gap:10px; margin-bottom:20px;';
+settingsScreen.appendChild(houseRow);
+
+const createHouseBtn = (label: string, style: number) => {
+    const b = document.createElement('button');
+    b.innerText = label;
+    b.style.cssText = 'padding:10px; background:#673AB7; color:white; border:none; border-radius:5px; cursor:pointer;';
+    b.onclick = () => {
+        if (!isGameStarted) return;
+        generateHouse(camera.position.x, camera.position.y - 1.8, camera.position.z, style);
+        toggleSettings();
+    };
+    houseRow.appendChild(b);
+};
+
+createHouseBtn('SLOT 1 (HUT)', 1);
+createHouseBtn('SLOT 2 (TOWER)', 2);
+createHouseBtn('SLOT 3 (GARDEN)', 3);
+
+const closeSBtn = document.createElement('button');
+closeSBtn.innerText = 'CLOSE & RESUME';
+closeSBtn.style.cssText = 'margin-top:20px; padding:10px 40px; background:#4CAF50; color:white; border:none; border-radius:5px; cursor:pointer;';
+closeSBtn.onclick = () => toggleSettings();
+settingsScreen.appendChild(closeSBtn);
+
+const backToMenuBtn = document.createElement('button');
+backToMenuBtn.innerText = 'BACK TO MENU';
+backToMenuBtn.style.cssText = 'margin-top:10px; padding:10px 40px; background:#f44336; color:white; border:none; border-radius:5px; cursor:pointer;';
+backToMenuBtn.onclick = () => { toggleSettings(); isGameStarted = false; homeScreen.style.display = 'flex'; homeScreen.style.opacity = '1'; homeScreen.style.pointerEvents = 'all'; ctrl.unlock(); };
+settingsScreen.appendChild(backToMenuBtn);
+
+const toggleSettings = () => {
+    isSettingsOpen = !isSettingsOpen;
+    settingsScreen.style.display = isSettingsOpen ? 'flex' : 'none';
+    if (isSettingsOpen) { ctrl.unlock(); }
+    else if (isGameStarted) { ctrl.lock(); }
+};
+
+settingsBtn.onclick = () => toggleSettings();
+
+const updateSlots = () => {
+    slotsContainer.innerHTML = '';
+    for (let i = 1; i <= 3; i++) {
+        const slotData = localStorage.getItem('mc_save_' + i);
+        const slot = document.createElement('div');
+        slot.style.cssText = 'background:rgba(255,255,255,0.1); padding:20px; border-radius:10px; border:2px solid rgba(255,255,255,0.2); text-align:center; display:flex; flex-direction:column; gap:10px; backdrop-filter: blur(5px);';
+        
+        const slotTitle = document.createElement('div');
+        slotTitle.innerText = 'SLOT ' + i;
+        slotTitle.style.fontWeight = 'bold';
+        slot.appendChild(slotTitle);
+
+        const slotStatus = document.createElement('div');
+        slotStatus.innerText = slotData ? 'SAVED GAME' : 'EMPTY';
+        slotStatus.style.fontSize = '12px';
+        slotStatus.style.color = slotData ? '#4CAF50' : '#888';
+        slot.appendChild(slotStatus);
+
+        if (slotData) {
+            const loadBtn = document.createElement('button');
+            loadBtn.innerText = 'LOAD';
+            loadBtn.style.cssText = 'padding:8px; background:#2196F3; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;';
+            loadBtn.onclick = (e) => { e.stopPropagation(); loadGame(i); };
+            slot.appendChild(loadBtn);
+        }
+
+        const saveBtn = document.createElement('button');
+        saveBtn.innerText = slotData ? 'OVERWRITE' : 'SAVE HERE';
+        saveBtn.style.cssText = `padding:8px; background:${slotData ? '#f44336' : '#666'}; color:white; border:none; border-radius:4px; cursor:pointer; font-size:12px;`;
+        saveBtn.onclick = (e) => { e.stopPropagation(); saveGame(i); };
+        slot.appendChild(saveBtn);
+
+        slotsContainer.appendChild(slot);
+    }
+};
+
+const saveGame = (s: number) => {
+    const worldData: Record<string, string> = {};
+    world.forEach((val, key) => {
+        worldData[key] = btoa(String.fromCharCode(...val));
+    });
+    const data = { p: camera.position.toArray(), w: worldData, t: time };
+    localStorage.setItem('mc_save_' + s, JSON.stringify(data));
+    updateSlots();
+    alert('Game Saved to Slot ' + s);
+};
+
+const loadGame = (s: number) => {
+    const raw = localStorage.getItem('mc_save_' + s);
+    if (!raw) return;
+    const d = JSON.parse(raw);
+    world.clear();
+    chunkGroups.forEach(g => scene.remove(g));
+    chunkGroups.clear();
+    for (const key in d.w) {
+        const binStr = atob(d.w[key]);
+        const arr = new Uint8Array(binStr.length);
+        for (let i = 0; i < binStr.length; i++) arr[i] = binStr.charCodeAt(i);
+        world.set(key, arr);
+        const [cx, cz] = key.split(',').map(Number);
+        meshChunk(cx!, cz!);
+    }
+    camera.position.fromArray(d.p);
+    time = d.t;
+    startGame();
+};
+
+const startGame = () => {
+    isGameStarted = true;
+    homeScreen.style.opacity = '0';
+    homeScreen.style.pointerEvents = 'none';
+    setTimeout(() => { homeScreen.style.display = 'none'; }, 500);
+    ctrl.lock();
+    renderer.render(scene, camera);
+};
+
+playBtn.onclick = startGame;
+updateSlots();
+
+// --- CONTROLS ---
 const ctrl = new PointerLockControls(camera, document.body);
 const keys: Record<string, boolean> = {};
 
-const toggleSettings = () => {
-    const isVisible = settingsMenu.style.display === 'block';
-    settingsMenu.style.display = isVisible ? 'none' : 'block';
-    if(!isVisible) ctrl.unlock(); else ctrl.lock();
-};
-
 document.addEventListener('keydown', e => { 
     keys[e.code] = true; 
-    if (e.key === '0') toggleSettings();
     if (e.key >= '1' && e.key <= '6') { slot = parseInt(e.key)-1; drawUI(); }
-});
-document.addEventListener('keyup', e => keys[e.code] = false);
-document.addEventListener('mousedown', (e) => { 
-    if(settingsMenu.style.display !== 'block') {
-        ctrl.lock();
-        if (ctrl.isLocked) {
-            // Basic block break/place logic can be added here
-            // For now just locking the pointer
+    if (e.key === '0' || e.key === 'Escape') { toggleSettings(); }
+    
+    if (e.code === 'Space' && isGameStarted && !isSettingsOpen) {
+        if (!spaceTimer) {
+            spaceTimer = setTimeout(() => {
+                isFlying = !isFlying;
+                velY = 0;
+                console.log(isFlying ? 'Flying Enabled' : 'Flying Disabled');
+            }, 3000); // Changed to 3 seconds
         }
-    } 
-});
-
-// Event Listeners
-document.getElementById('resume-btn')?.addEventListener('click', toggleSettings);
-document.getElementById('rd-range')?.addEventListener('input', (e: Event) => {
-    const target = e.target as HTMLInputElement;
-    if (target) {
-        renderDist = parseInt(target.value);
-        const val = document.getElementById('rd-val');
-        if (val) val.innerText = target.value;
     }
 });
-document.getElementById('tex-btn')?.addEventListener('click', () => {
-    useTextures = !useTextures;
-    const btn = document.getElementById('tex-btn');
-    if(btn) btn.innerText = `TEXTURES: ${useTextures?'ON':'OFF'}`;
-    for(const m in mats) {
-        if(mats[m]) { mats[m].map = useTextures ? tex : null; mats[m].needsUpdate = true; }
+document.addEventListener('keyup', e => {
+    keys[e.code] = false;
+    if (e.code === 'Space') {
+        clearTimeout(spaceTimer);
+        spaceTimer = null;
     }
 });
-document.getElementById('dev-btn')?.addEventListener('click', () => {
-    isDev = !isDev;
-    const btn = document.getElementById('dev-btn');
-    if(btn) { btn.innerText = `DEV MODE: ${isDev?'ON':'OFF'}`; btn.style.background = isDev ? '#4CAF50' : '#444'; }
-    const opts = document.getElementById('dev-opts');
-    if(opts) opts.style.display = isDev?'block':'none';
-});
-document.getElementById('t-range')?.addEventListener('input', (e: Event) => {
-    const target = e.target as HTMLInputElement;
-    if (target) time = parseInt(target.value);
-});
+document.addEventListener('mousedown', () => { if(isGameStarted && !isSettingsOpen) ctrl.lock(); });
 
-// --- GAME LOOP & PHYSICS ---
+// --- GAME LOOP ---
 let velY = 0, lastF = performance.now(), frames = 0;
 camera.position.set(0, 15, 0);
 
+// Initial chunks
+for(let x=-renderDist; x<=renderDist; x++) {
+    for(let z=-renderDist; z<=renderDist; z++) {
+        genChunk(x, z);
+    }
+}
+
+const clockDisplay = document.createElement('div');
+clockDisplay.style.cssText = 'position:fixed; top:15px; right:15px; color:white; font-family:monospace; font-size:22px; font-weight:bold; z-index:20;';
+document.body.appendChild(clockDisplay);
+
+const fpsDisplay = document.createElement('div');
+fpsDisplay.style.cssText = 'position:fixed; top:15px; left:15px; color:lime; font-family:monospace; font-size:12px; z-index:20;';
+document.body.appendChild(fpsDisplay);
+
+// --- CROSSHAIR ---
+const crosshair = document.createElement('div');
+crosshair.style.cssText = 'position:fixed; top:50%; left:50%; width:20px; height:20px; transform:translate(-50%, -50%); pointer-events:none; z-index:100;';
+crosshair.innerHTML = `<div style="position:absolute; top:9px; left:0; width:20px; height:2px; background:white; opacity:0.8;"></div><div style="position:absolute; top:0; left:9px; width:2px; height:20px; background:white; opacity:0.8;"></div>`;
+document.body.appendChild(crosshair);
+
+// --- CHARACTER HAND ---
+const hand = document.createElement('div');
+hand.style.cssText = 'position:fixed; bottom:-20px; right:10%; width:250px; height:300px; background:#d2b48c; border:10px solid #bc8f8f; border-radius:40px 40px 0 0; transform: rotate(-10deg); z-index:50; transition: 0.1s;';
+document.body.appendChild(hand);
+
+const ui = document.createElement('div');
+ui.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:8px; padding:10px; background:rgba(0,0,0,0.6); border-radius:15px; z-index:10;';
+document.body.appendChild(ui);
+
+const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
+let slot = 0;
+const drawUI = () => {
+    ui.innerHTML = inv.map((item, i) => `
+        <div style="width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+            <div style="width:22px; height:22px; background:#${mats[item]!.color.getHexString()}; border-radius:4px;"></div>
+            <span style="font-size:10px; color:white;">${i+1}</span>
+        </div>`).join('');
+    // Update hand color to match selected block
+    hand.style.background = `#${mats[inv[slot]!]!.color.getHexString()}`;
+};
+drawUI();
+
 function animate() {
     requestAnimationFrame(animate);
-    const now = performance.now();
-    frames++;
-    if (now > lastF + 1000) { fpsDisplay.innerText = `FPS: ${frames}`; frames = 0; lastF = now; }
-
-    if (ctrl.isLocked) {
-        time = (time + 0.003) % 2400; 
-        clock.innerText = getTimeStr();
-
+    
+    if (isGameStarted) {
         const dayInt = Math.max(0.1, Math.sin((time / 2400) * Math.PI) * 1.2);
         scene.background = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.45);
         ambient.intensity = dayInt * 0.7;
@@ -343,42 +549,97 @@ function animate() {
                 genChunk(cx+x, cz+z);
             }
         }
+    }
 
-        // Improved Physics
-        velY -= 0.008; 
-        camera.position.y += velY;
+    if (!isGameStarted) {
+        renderer.render(scene, camera);
+        return;
+    }
 
+    const now = performance.now();
+    frames++;
+    if (now > lastF + 1000) { fpsDisplay.innerText = `FPS: ${frames}`; frames = 0; lastF = now; }
+
+    if (ctrl.isLocked) {
+        time = (time + 0.003) % 2400; 
+        clockDisplay.innerText = getTimeStr();
+
+        // 1. Vertical Movement (Gravity or Flight)
         const px = camera.position.x;
         const py = camera.position.y;
         const pz = camera.position.z;
+        const footY = py - 1.7;
 
-        // Bounding box check (simplified)
-        const checkPoints = [
-            [px-0.3, py-1.7, pz-0.3], [px+0.3, py-1.7, pz-0.3],
-            [px-0.3, py-1.7, pz+0.3], [px+0.3, py-1.7, pz+0.3]
-        ] as const;
+        const getCollision = (x: number, y: number, z: number) => {
+            const b = getBlock(x, y, z);
+            return b !== BlockType.AIR && b !== BlockType.WATER;
+        };
 
-        let onGround = false;
-        for (const p of checkPoints) {
-            const b = getBlock(Math.round(p[0]), Math.floor(p[1]), Math.round(p[2]));
-            if (b !== BlockType.AIR && b !== BlockType.WATER) {
-                onGround = true; break;
+        if (isFlying) {
+            velY = 0;
+            if (keys['Space']) camera.position.y += 0.15;
+            if (keys['ArrowDown']) camera.position.y -= 0.15;
+            
+            hand.style.transform = `rotate(-10deg) translateY(${Math.sin(now * 0.005) * 10}px)`;
+        } else {
+            velY -= 0.008; 
+            const nextY = camera.position.y + velY;
+            const nextFootY = nextY - 1.7;
+
+            let onGround = false;
+            const checkPoints = [[px-0.2, nextFootY, pz-0.2], [px+0.2, nextFootY, pz-0.2], [px-0.2, nextFootY, pz+0.2], [px+0.2, nextFootY, pz+0.2]] as const;
+            for (const p of checkPoints) {
+                if (getCollision(p[0], p[1], p[2])) { onGround = true; break; }
             }
-        }
-        
-        if (onGround) {
-            if (velY < 0) { 
-                camera.position.y = Math.floor(py - 1.7) + 1.8; 
+            
+            if (onGround && velY < 0) {
+                // Cari ketinggian lantai yang paling tinggi di bawah kaki
+                let maxFloorY = -1;
+                for (const p of checkPoints) {
+                    if (getCollision(p[0], p[1], p[2])) {
+                        maxFloorY = Math.max(maxFloorY, Math.floor(p[1]) + 1);
+                    }
+                }
+                camera.position.y = maxFloorY + 1.7; // Kunci mata pada 1.7 unit atas lantai
                 velY = 0; 
                 if(keys['Space']) velY = 0.15; 
+            } else {
+                camera.position.y = nextY;
+            }
+            
+            if (keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD']) {
+                hand.style.transform = `rotate(-10deg) translateY(${Math.abs(Math.sin(now * 0.01)) * 20}px)`;
+            } else {
+                hand.style.transform = `rotate(-10deg) translateY(0px)`;
             }
         }
 
+        // 2. Horizontal Movement
+        const oldX = camera.position.x;
+        const oldZ = camera.position.z;
         const speed = keys['ShiftLeft'] ? 0.2 : 0.12;
+
         if(keys['KeyW']) ctrl.moveForward(speed);
         if(keys['KeyS']) ctrl.moveForward(-speed);
         if(keys['KeyA']) ctrl.moveRight(-speed);
         if(keys['KeyD']) ctrl.moveRight(speed);
+
+        const newX = camera.position.x;
+        const newZ = camera.position.z;
+
+        const isColliding = (nx: number, nz: number) => {
+            return getCollision(nx, py - 1.2, nz) || getCollision(nx, py - 0.5, nz);
+        };
+
+        if (!isFlying && isColliding(newX, newZ)) {
+            const canStep = !getCollision(newX, py, newZ) && !getCollision(newX, py + 0.5, newZ);
+            if (canStep && getCollision(newX, py - 1.2, newZ)) {
+                camera.position.y += 0.5;
+            } else {
+                camera.position.x = oldX;
+                camera.position.z = oldZ;
+            }
+        }
     }
     renderer.render(scene, camera);
 }
