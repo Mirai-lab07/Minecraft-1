@@ -17,10 +17,18 @@ const hungerDecreaseRate = 0.05; // per frame/second
 let lastHungerUpdate = performance.now();
 
 const foodModels = [
-    'apple.glb', 'banana.glb', 'burger.glb', 'cheese.glb', 'hot-dog.glb', 'pizza.glb'
+    'apple.glb', 'banana.glb', 'burger.glb', 'cheese.glb', 'hot-dog.glb', 'pizza.glb',
+    'avocado.glb', 'bacon.glb', 'bag.glb', 'barrel.glb', 'beet.glb', 'bottle-ketchup.glb',
+    'bottle-oil.glb', 'bowl-soup.glb', 'bread.glb', 'broccoli.glb', 'cabbage.glb', 'cake.glb',
+    'can.glb', 'candy-bar.glb', 'carrot.glb', 'cherries.glb', 'chocolate.glb', 'cookie.glb',
+    'corn.glb', 'croissant.glb', 'cupcake.glb', 'donut.glb', 'egg.glb', 'eggplant.glb',
+    'fish.glb', 'grapes.glb', 'honey.glb', 'ice-cream.glb', 'lemon.glb', 'muffin.glb',
+    'onion.glb', 'orange.glb', 'pancakes.glb', 'pear.glb', 'pie.glb', 'pineapple.glb'
 ];
 const characterModels = [
-    'character-a.glb', 'character-b.glb', 'character-c.glb'
+    'character-a.glb', 'character-b.glb', 'character-c.glb', 'character-d.glb', 'character-e.glb', 'character-f.glb',
+    'character-g.glb', 'character-h.glb', 'character-i.glb', 'character-j.glb', 'character-k.glb', 'character-l.glb',
+    'character-m.glb', 'character-n.glb', 'character-o.glb', 'character-p.glb', 'character-q.glb', 'character-r.glb'
 ];
 
 const modelCache: Record<string, THREE.Group> = {};
@@ -41,6 +49,25 @@ interface Entity {
 const entities = new Map<string, Entity[]>();
 const playerInventory = new Map<string, number>();
 let isInventoryOpen = false;
+
+// Crafting State
+const craftingSlots: (string | null)[] = [null, null, null, null];
+let craftingResult: { item: string, count: number } | null = null;
+
+const recipes = [
+    { input: ['wood', null, 'wood', null], output: 'wood_sword', count: 1 },
+    { input: ['stone', null, 'wood', null], output: 'stone_knife', count: 1 },
+    { input: ['silver', null, 'wood', null], output: 'silver_knife', count: 1 },
+    { input: ['diamond', null, 'wood', null], output: 'diamond_knife', count: 1 },
+    { input: ['stone', 'stone', 'stone', 'stone'], output: 'stone_brick', count: 4 },
+];
+
+const weapons: Record<string, { name: string, color: number, damage: number }> = {
+    'wood_sword': { name: 'Wood Sword', color: 0x8d6e63, damage: 5 },
+    'stone_knife': { name: 'Stone Knife', color: 0x757575, damage: 8 },
+    'silver_knife': { name: 'Silver Knife', color: 0xc0c0c0, damage: 15 },
+    'diamond_knife': { name: 'Diamond Knife', color: 0x00ffff, damage: 25 },
+};
 
 // Block Breaking State
 let breakingBlock: { x: number, y: number, z: number, startTime: number } | null = null;
@@ -72,20 +99,65 @@ topSection.appendChild(craftingSection);
 
 const craftingGrid = document.createElement('div');
 craftingGrid.style.cssText = 'display:grid; grid-template-columns: repeat(2, 1fr); gap:8px;';
+craftingSection.appendChild(craftingGrid);
+
+const craftingSlotDivs: HTMLDivElement[] = [];
 for(let i=0; i<4; i++) {
     const slot = document.createElement('div');
-    slot.style.cssText = 'width:50px; height:50px; background:rgba(255,255,255,0.1); border:1px solid #555; border-radius:5px;';
+    slot.style.cssText = 'width:50px; height:50px; background:rgba(255,255,255,0.1); border:1px solid #555; border-radius:5px; display:flex; align-items:center; justify-content:center; cursor:pointer;';
+    slot.onclick = () => handleCraftingSlotClick(i);
     craftingGrid.appendChild(slot);
+    craftingSlotDivs.push(slot);
 }
-craftingSection.appendChild(craftingGrid);
 
 const arrow = document.createElement('div');
 arrow.innerText = '➡'; arrow.style.fontSize = '30px';
 craftingSection.appendChild(arrow);
 
 const resultSlot = document.createElement('div');
-resultSlot.style.cssText = 'width:65px; height:65px; background:rgba(255,255,255,0.15); border:2px solid #4CAF50; border-radius:8px;';
+resultSlot.style.cssText = 'width:65px; height:65px; background:rgba(255,255,255,0.15); border:2px solid #4CAF50; border-radius:8px; display:flex; align-items:center; justify-content:center; cursor:pointer;';
+resultSlot.onclick = () => claimCraftingResult();
 craftingSection.appendChild(resultSlot);
+
+const checkCrafting = () => {
+    craftingResult = null;
+    for (const recipe of recipes) {
+        let match = true;
+        for (let i = 0; i < 4; i++) {
+            if (craftingSlots[i] !== recipe.input[i]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            craftingResult = { item: recipe.output, count: recipe.count };
+            break;
+        }
+    }
+};
+
+const handleCraftingSlotClick = (index: number) => {
+    const item = craftingSlots[index];
+    if (item) {
+        addToInventory(item);
+        craftingSlots[index] = null;
+        checkCrafting();
+        drawInventory();
+    }
+};
+
+const claimCraftingResult = () => {
+    if (craftingResult) {
+        for (let i = 0; i < craftingResult.count; i++) {
+            addToInventory(craftingResult.item);
+        }
+        for (let i = 0; i < 4; i++) {
+            craftingSlots[i] = null;
+        }
+        craftingResult = null;
+        drawInventory();
+    }
+};
 
 // Bottom Section: 3x8 Inventory
 const invGrid = document.createElement('div');
@@ -130,6 +202,41 @@ const animateCharPreview = () => {
 
 const drawInventory = () => {
     invGrid.innerHTML = '';
+    
+    // Update Crafting Slots UI
+    craftingSlotDivs.forEach((div, i) => {
+        div.innerHTML = '';
+        const item = craftingSlots[i];
+        if (item) {
+            const isWeapon = weapons[item];
+            if (isWeapon) {
+                div.innerHTML = `<div style="width:24px; height:24px; background:#${isWeapon.color.toString(16)}; border-radius:4px;"></div>`;
+            } else if (item.endsWith('.glb')) {
+                div.innerHTML = `<div style="font-size:20px;">🍎</div>`;
+            } else {
+                div.innerHTML = `<div style="width:24px; height:24px; background:#${mats[item]?.color.getHexString() || 'fff'}; border-radius:4px;"></div>`;
+            }
+        }
+    });
+
+    // Update Result Slot UI
+    resultSlot.innerHTML = '';
+    if (craftingResult) {
+        const item = craftingResult.item;
+        const isWeapon = weapons[item];
+        if (isWeapon) {
+            resultSlot.innerHTML = `<div style="display:flex; flex-direction:column; align-items:center;"><div style="width:30px; height:30px; background:#${isWeapon.color.toString(16)}; border-radius:4px;"></div><div style="font-size:9px;">${isWeapon.name}</div></div>`;
+        } else {
+            resultSlot.innerHTML = `<div style="width:30px; height:30px; background:#fff; border-radius:4px;"></div>`;
+        }
+        if (craftingResult.count > 1) {
+            const b = document.createElement('div');
+            b.style.cssText = 'position:absolute; bottom:2px; right:5px; background:rgba(0,0,0,0.6); padding:1px 4px; border-radius:4px; font-size:10px;';
+            b.innerText = craftingResult.count.toString();
+            resultSlot.appendChild(b);
+        }
+    }
+
     const items = Array.from(playerInventory.entries());
     // Total 24 slots (3x8)
     for (let i = 0; i < 24; i++) {
@@ -138,8 +245,15 @@ const drawInventory = () => {
         slotDiv.style.cssText = 'aspect-ratio:1/1; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.1); border-radius:8px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer; font-size:10px; transition:0.1s; position:relative; color:white; overflow:hidden; text-align:center;';
         
         if (itemName) {
+            const isWeapon = weapons[itemName];
             const isFood = itemName.endsWith('.glb');
-            if (isFood) {
+            if (isWeapon) {
+                slotDiv.innerHTML = `<div style="font-size:24px;">⚔️</div><div>${isWeapon.name}</div>`;
+                slotDiv.onclick = () => {
+                    // Equip or move to crafting? Let's say move to crafting for consistency
+                    moveToCrafting(itemName);
+                };
+            } else if (isFood) {
                 let icon = '🍎';
                 if (itemName.includes('apple')) icon = '🍎';
                 else if (itemName.includes('banana')) icon = '🍌';
@@ -159,6 +273,7 @@ const drawInventory = () => {
             } else {
                 // It's a block
                 slotDiv.innerHTML = `<div style="width:24px; height:24px; background:#${mats[itemName]?.color.getHexString() || 'fff'}; border-radius:4px; margin-bottom:4px;"></div><div>${itemName}</div>`;
+                slotDiv.onclick = () => moveToCrafting(itemName);
             }
 
             // Count Badge
@@ -171,6 +286,18 @@ const drawInventory = () => {
             slotDiv.onmouseout = () => { slotDiv.style.background = 'rgba(255,255,255,0.05)'; slotDiv.style.borderColor = 'rgba(255,255,255,0.1)'; };
         }
         invGrid.appendChild(slotDiv);
+    }
+};
+
+const moveToCrafting = (itemName: string) => {
+    const emptyIndex = craftingSlots.indexOf(null);
+    if (emptyIndex !== -1) {
+        craftingSlots[emptyIndex] = itemName;
+        const current = playerInventory.get(itemName) || 0;
+        if (current > 1) playerInventory.set(itemName, current - 1);
+        else playerInventory.delete(itemName);
+        checkCrafting();
+        drawInventory();
     }
 };
 
@@ -219,7 +346,8 @@ enum BlockType {
     SAND = 6,
     WATER = 7,
     SILVER = 8,
-    DIAMOND = 9
+    DIAMOND = 9,
+    STONE_BRICK = 10
 }
 
 const idToName: Record<number, string> = {
@@ -231,10 +359,11 @@ const idToName: Record<number, string> = {
     [BlockType.SAND]: 'sand',
     [BlockType.WATER]: 'water',
     [BlockType.SILVER]: 'silver',
-    [BlockType.DIAMOND]: 'diamond'
+    [BlockType.DIAMOND]: 'diamond',
+    [BlockType.STONE_BRICK]: 'stone_brick'
 };
 
-const mats: Record<string, THREE.MeshLambertMaterial> = {}; // Initialized later
+const mats: Record<string, THREE.MeshStandardMaterial> = {}; // Initialized later
 
 // --- GLOBAL STATE ---
 let isGameStarted = false;
@@ -266,34 +395,77 @@ const getTimeStr = () => {
 // --- SCENE SETUP ---
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(1);
+renderer.setPixelRatio(window.devicePixelRatio || 1);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+const ambient = new THREE.AmbientLight(0xffffff, 0.4);
 scene.add(ambient);
-const sun = new THREE.DirectionalLight(0xffffff, 0.6);
-sun.position.set(10, 50, 10);
+
+const hemiLight = new THREE.HemisphereLight(0x87ceeb, 0x567d46, 0.4);
+scene.add(hemiLight);
+
+const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+sun.position.set(50, 100, 50);
+sun.castShadow = true;
+sun.shadow.mapSize.width = 2048;
+sun.shadow.mapSize.height = 2048;
+sun.shadow.camera.left = -100;
+sun.shadow.camera.right = 100;
+sun.shadow.camera.top = 100;
+sun.shadow.camera.bottom = -100;
+sun.shadow.camera.near = 0.5;
+sun.shadow.camera.far = 500;
 scene.add(sun);
+
+// Fog for depth (Realistic effect)
+scene.fog = new THREE.FogExp2(0x87ceeb, 0.01);
 
 // --- MATERIALS & TEXTURE ---
 const tex = (() => {
-    const c = document.createElement('canvas'); c.width = 16; c.height = 16;
-    const ctx = c.getContext('2d')!; ctx.fillStyle = '#fff'; ctx.fillRect(0,0,16,16);
-    for(let i=0; i<32; i++){ ctx.fillStyle=`rgba(0,0,0,0.1)`; ctx.fillRect(Math.random()*16, Math.random()*16, 1,1); }
-    const t = new THREE.CanvasTexture(c); t.magFilter = t.minFilter = THREE.NearestFilter; return t;
+    const size = 32;
+    const c = document.createElement('canvas'); c.width = size; c.height = size;
+    const ctx = c.getContext('2d')!; 
+    ctx.fillStyle = '#fff'; 
+    ctx.fillRect(0,0,size,size);
+    
+    for(let i=0; i<(size*size); i++){ 
+        const x = i % size;
+        const y = Math.floor(i / size);
+        const noiseVal = Math.random() * 0.15;
+        ctx.fillStyle=`rgba(0,0,0,${noiseVal})`; 
+        ctx.fillRect(x, y, 1, 1); 
+    }
+    const t = new THREE.CanvasTexture(c); 
+    t.magFilter = t.minFilter = THREE.NearestFilter; 
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    return t;
 })();
 
-mats['grass'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x567d46 });
-mats['dirt'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x5d4037 });
-mats['stone'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x757575 });
-mats['wood'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x8d6e63 });
-mats['leaves'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x388e3c, transparent:true, opacity:0.8 });
-mats['sand'] = new THREE.MeshLambertMaterial({ map: tex, color: 0xe3c07d });
-mats['water'] = new THREE.MeshLambertMaterial({ color: 0x00aaff, transparent:true, opacity:0.6 });
-mats['silver'] = new THREE.MeshLambertMaterial({ map: tex, color: 0xc0c0c0 });
-mats['diamond'] = new THREE.MeshLambertMaterial({ map: tex, color: 0x00ffff });
+const createMat = (color: number, transparent = false, opacity = 1) => {
+    return new THREE.MeshStandardMaterial({ 
+        map: tex, 
+        color: color, 
+        roughness: 0.7, 
+        metalness: 0.1,
+        transparent,
+        opacity
+    });
+};
+
+mats['grass'] = createMat(0x567d46);
+mats['dirt'] = createMat(0x5d4037);
+mats['stone'] = createMat(0x757575);
+mats['wood'] = createMat(0x8d6e63);
+mats['leaves'] = createMat(0x388e3c, true, 0.8);
+mats['sand'] = createMat(0xe3c07d);
+mats['water'] = new THREE.MeshStandardMaterial({ color: 0x00aaff, transparent:true, opacity:0.6, roughness: 0.1, metalness: 0.5 });
+mats['silver'] = createMat(0xc0c0c0);
+mats['diamond'] = createMat(0x00ffff);
+mats['stone_brick'] = createMat(0x444444);
 
 // --- WORLD LOGIC ---
 const getChunkCoord = (x: number, z: number) => {
@@ -340,6 +512,8 @@ const meshChunk = (cx: number, cz: number) => {
         const type = parseInt(typeStr);
         const name = idToName[type]!;
         const mesh = new THREE.InstancedMesh(box, mats[name]!, count);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         let idx = 0;
         for (let rx = 0; rx < CHUNK_SIZE; rx++) {
             for (let rz = 0; rz < CHUNK_SIZE; rz++) {
@@ -689,6 +863,48 @@ createHouseBtn('SLOT 1 (HUT)', 1);
 createHouseBtn('SLOT 2 (TOWER)', 2);
 createHouseBtn('SLOT 3 (GARDEN)', 3);
 
+const slotsTitle = document.createElement('h3');
+slotsTitle.innerText = 'SAVE / LOAD GAME';
+slotsTitle.style.marginTop = '20px';
+settingsContent.appendChild(slotsTitle);
+
+const settingsSlotsContainer = document.createElement('div');
+settingsSlotsContainer.style.cssText = 'display:grid; grid-template-columns: 1fr; gap:10px; width:100%;';
+settingsContent.appendChild(settingsSlotsContainer);
+
+const updateSettingsSlots = () => {
+    settingsSlotsContainer.innerHTML = '';
+    for (let i = 1; i <= 3; i++) {
+        const slotData = localStorage.getItem('mc_save_' + i);
+        const slot = document.createElement('div');
+        slot.style.cssText = 'background:rgba(255,255,255,0.05); padding:10px; border-radius:8px; border:1px solid rgba(255,255,255,0.1); display:flex; justify-content:space-between; align-items:center;';
+        
+        const info = document.createElement('div');
+        info.innerHTML = `<div style="font-weight:bold; font-size:14px;">Slot ${i}</div><div style="font-size:10px; color:${slotData?'#4CAF50':'#888'}">${slotData?'Saved':'Empty'}</div>`;
+        slot.appendChild(info);
+
+        const btns = document.createElement('div');
+        btns.style.display = 'flex'; btns.style.gap = '5px';
+        
+        if (slotData) {
+            const l = document.createElement('button');
+            l.innerText = 'LOAD';
+            l.style.cssText = 'padding:5px 10px; background:#2196F3; color:white; border:none; border-radius:4px; cursor:pointer; font-size:11px;';
+            l.onclick = () => { if(confirm('Load this save?')) { loadGame(i); toggleSettings(); } };
+            btns.appendChild(l);
+        }
+
+        const s = document.createElement('button');
+        s.innerText = 'SAVE';
+        s.style.cssText = 'padding:5px 10px; background:#4CAF50; color:white; border:none; border-radius:4px; cursor:pointer; font-size:11px;';
+        s.onclick = () => { saveGame(i); updateSettingsSlots(); updateSlots(); };
+        btns.appendChild(s);
+
+        slot.appendChild(btns);
+        settingsSlotsContainer.appendChild(slot);
+    }
+};
+
 const closeSBtn = document.createElement('button');
 closeSBtn.innerText = 'CLOSE & RESUME';
 closeSBtn.style.cssText = 'margin-top:20px; padding:10px 40px; background:#4CAF50; color:white; border:none; border-radius:5px; cursor:pointer;';
@@ -704,7 +920,10 @@ settingsScreen.appendChild(backToMenuBtn);
 const toggleSettings = () => {
     isSettingsOpen = !isSettingsOpen;
     settingsScreen.style.display = isSettingsOpen ? 'flex' : 'none';
-    if (isSettingsOpen) { ctrl.unlock(); }
+    if (isSettingsOpen) { 
+        ctrl.unlock(); 
+        updateSettingsSlots(); // Refresh slots UI when opening
+    }
     else if (isGameStarted) { ctrl.lock(); }
 };
 
@@ -822,6 +1041,23 @@ document.addEventListener('keyup', e => {
 const addToInventory = (item: string) => {
     const current = playerInventory.get(item) || 0;
     playerInventory.set(item, current + 1);
+    
+    // Auto-add to hotbar if not present and there's space
+    if (!hotbar.includes(item)) {
+        const emptyHotbarIdx = hotbar.indexOf(null);
+        if (emptyHotbarIdx !== -1) {
+            hotbar[emptyHotbarIdx] = item;
+            drawUI();
+        }
+    }
+};
+
+const getBreakDuration = () => {
+    const item = hotbar[slot];
+    if (item && weapons[item]) {
+        return 1000 / (weapons[item].damage / 5); 
+    }
+    return 1000;
 };
 
 const raycaster = new THREE.Raycaster();
@@ -1036,19 +1272,59 @@ const updateHunger = (delta: number) => {
     else hungerBar.style.background = '#4CAF50';
 };
 
-const inv = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand'];
+const hotbar: (string | null)[] = ['grass', 'dirt', 'stone', 'wood', 'leaves', 'sand', null, null, null];
 let slot = 0;
 const drawUI = () => {
     ui.innerHTML = '';
-    inv.forEach((item, i) => {
+    hotbar.forEach((item, i) => {
         const s = document.createElement('div');
-        s.style.cssText = `width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer;`;
-        s.innerHTML = `<div style="width:22px; height:22px; background:#${mats[item]!.color.getHexString()}; border-radius:4px; pointer-events:none;"></div><span style="font-size:10px; color:white; pointer-events:none;">${i+1}</span>`;
+        s.style.cssText = `width:50px; height:50px; background:${i===slot?'rgba(255,255,255,0.3)':'rgba(0,0,0,0.2)'}; border:2px solid ${i===slot?'#fff':'transparent'}; border-radius:10px; display:flex; flex-direction:column; align-items:center; justify-content:center; cursor:pointer; position:relative;`;
+        
+        if (item) {
+            const isWeapon = weapons[item];
+            if (isWeapon) {
+                s.innerHTML = `<div style="font-size:20px;">⚔️</div><span style="font-size:8px; color:white; text-align:center;">${isWeapon.name}</span>`;
+            } else if (item.endsWith('.glb')) {
+                s.innerHTML = `<div style="font-size:20px;">🍎</div>`;
+            } else {
+                s.innerHTML = `<div style="width:22px; height:22px; background:#${mats[item]?.color.getHexString() || 'fff'}; border-radius:4px;"></div>`;
+            }
+            
+            const count = playerInventory.get(item) || 0;
+            if (count > 1) {
+                const badge = document.createElement('div');
+                badge.style.cssText = 'position:absolute; bottom:2px; right:5px; background:rgba(0,0,0,0.6); padding:1px 3px; border-radius:3px; font-size:9px; color:white;';
+                badge.innerText = count.toString();
+                s.appendChild(badge);
+            }
+        }
+        
+        s.innerHTML += `<span style="position:absolute; top:2px; left:5px; font-size:9px; color:rgba(255,255,255,0.5);">${i+1}</span>`;
         s.onclick = (e) => { e.stopPropagation(); slot = i; drawUI(); };
         ui.appendChild(s);
     });
-    // Update hand color to match selected block
-    hand.style.background = `#${mats[inv[slot]!]!.color.getHexString()}`;
+
+    // Update hand appearance
+    const currentItem = hotbar[slot];
+    if (currentItem && weapons[currentItem]) {
+        hand.style.background = `#${weapons[currentItem].color.toString(16)}`;
+        hand.style.width = '40px';
+        hand.style.height = '250px';
+        hand.style.borderRadius = '5px';
+        hand.style.border = '2px solid rgba(0,0,0,0.3)';
+    } else if (currentItem && mats[currentItem]) {
+        hand.style.background = `#${mats[currentItem].color.getHexString()}`;
+        hand.style.width = '250px';
+        hand.style.height = '300px';
+        hand.style.borderRadius = '40px 40px 0 0';
+        hand.style.border = '10px solid #bc8f8f';
+    } else {
+        hand.style.background = '#d2b48c';
+        hand.style.width = '250px';
+        hand.style.height = '300px';
+        hand.style.borderRadius = '40px 40px 0 0';
+        hand.style.border = '10px solid #bc8f8f';
+    }
 };
 drawUI();
 
@@ -1059,15 +1335,16 @@ function animate() {
 
     // 0. Block Breaking Logic
     if (breakingBlock && !isInventoryOpen && !isSettingsOpen) {
+        const currentBreakDuration = getBreakDuration();
         const elapsed = now - breakingBlock.startTime;
-        const progress = Math.min(1, elapsed / breakDuration);
+        const progress = Math.min(1, elapsed / currentBreakDuration);
         
         // Update circle UI
         breakProgressCircle.style.display = 'block';
         breakProgressCircle.style.borderTopColor = `hsl(${progress * 120}, 100%, 50%)`;
         breakProgressCircle.style.transform = `translate(-50%, -50%) rotate(${progress * 360}deg)`;
         
-        if (elapsed >= breakDuration) {
+        if (elapsed >= currentBreakDuration) {
             const blockType = getBlock(breakingBlock.x, breakingBlock.y, breakingBlock.z);
             if (blockType !== BlockType.AIR) {
                 const blockName = idToName[blockType];
@@ -1084,17 +1361,42 @@ function animate() {
 
     if (isGameStarted) {
         const dayInt = Math.max(0.1, Math.sin((time / 2400) * Math.PI) * 1.2);
-        scene.background = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.45);
-        ambient.intensity = dayInt * 0.7;
+        const bgColor = new THREE.Color().setHSL(0.6, 0.5, dayInt * 0.45);
+        scene.background = bgColor;
+        if (scene.fog instanceof THREE.FogExp2) {
+            scene.fog.color.copy(bgColor);
+        }
+        ambient.intensity = dayInt * 0.5;
         sun.intensity = dayInt * 0.8;
+        hemiLight.intensity = dayInt * 0.4;
 
         const cx = Math.floor(camera.position.x / CHUNK_SIZE);
         const cz = Math.floor(camera.position.z / CHUNK_SIZE);
+        
+        // 1. Load nearby chunks
         for(let x=-renderDist; x<=renderDist; x++) {
             for(let z=-renderDist; z<=renderDist; z++) {
                 genChunk(cx+x, cz+z);
             }
         }
+
+        // 2. Optimization: Unload distant chunks to boost FPS
+        chunkGroups.forEach((group, key) => {
+            const [gcx, gcz] = key.split(',').map(Number);
+            const dx = Math.abs(gcx! - cx);
+            const dz = Math.abs(gcz! - cz);
+            if (dx > renderDist + 1 || dz > renderDist + 1) {
+                scene.remove(group);
+                group.clear();
+                chunkGroups.delete(key);
+                // Also remove entities in that chunk
+                const ents = entities.get(key);
+                if (ents) {
+                    ents.forEach(e => scene.remove(e.mesh));
+                    entities.delete(key);
+                }
+            }
+        });
     }
 
     if (!isGameStarted) {
